@@ -1,0 +1,1 @@
+cross-encoder reranking - GPU can matter, but not required
