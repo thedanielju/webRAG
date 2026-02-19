@@ -8,3 +8,7 @@ previous layers are treated as primitives
 2. ingestion = fetch me content
 3. indexing = make it retrievable
 4. retrieval/answering = can we answer now
+
+these endpoints from firecrawl could have utility
+batch_scrape 
+search

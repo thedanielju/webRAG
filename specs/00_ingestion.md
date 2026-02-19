@@ -40,20 +40,23 @@ discover_links(url):
 
 ## OUTPUTS
 
-From Firecrawl (pass-through):
-- url
-- markdown
-- html  
-- links (list of outgoing URLs)
-- title, language, statusCode (from metadata)
+# scrape(url), based off default_options, returns a Document object with these fields populated:
+1. markdown - cleaned main content as markdown
+2. html - cleaned HTML (preserves tables, code blocks)
+3. links - list of outgoing URLs found on the page
+4. metadata - contains title, language, statusCode, description
+
+these fields will be None (not requested): actions, branding, change_tracking, json, raw_html, screenshot, summary, images
+
+# map(url) returns a plain Python list of LinkResult objects, each with:
+1. url — always present
+2. title — optional, may be None
+3. description — optional, may be None
 
 Added by ingestion:
 - fetched_at (timestamp)
 - content_hash (md5/sha256 of markdown, for deduplication)
 - doc_type ("html" | "pdf")
-
-Excluded from Firecrawl response (noise):
-- rawHtml, screenshot, ogImage, ogTitle, ogDescription
 
 LinkCandidate:
 - url (required)

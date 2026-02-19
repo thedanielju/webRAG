@@ -42,10 +42,7 @@ Responsibilities:
 - Prevent duplicate ingestion
 
 Components:
-1. Fetch: 
-- HTTP client for standard pages
-- Headless browser renderer for JS-heavy pages
-- robots.txt compliance and rate limiting
+1. Ingest: Managed by firecrawl (bot, scraping, rate limiting compliance, browser rendering, etc)
 
 2. Extract and Store:
 - url
