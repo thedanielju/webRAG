@@ -61,6 +61,8 @@ Components:
 - normalize trailing slashes
 - content hashing for deduplication
 
+all managed by firecrawl - subject to specs in ingestion.md
+
 ## INDEX Layer
 Chunking:
 Chunk documents by semantic structure (headings / paragraphs).
@@ -164,7 +166,7 @@ and will eventually support:
 - credentialed access (user-provided)
 
 ## INTENDED USAGE MODEL
-CorpusFlow enables “docs-as-context” workflows where users can:
+WebRAG enables “docs-as-context” workflows where users can:
 - query web documentation conversationally
 - verify answers against source text
 - explore linked material iteratively

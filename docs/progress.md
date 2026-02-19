@@ -3,6 +3,9 @@
 - decisions contains architectural, contractual design choices for reference
 - specs contains exact design specifications
 
+1. set up firecrawl
+2. design ingestion
+
 ## long term thoughts:
 1. implement corpus identity:
 

@@ -1,0 +1,1 @@
+firecrawl is special because web extraction is unreliable - getting the right content
