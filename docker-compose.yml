@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: webrag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: webrag
+      POSTGRES_USER: webrag
+      POSTGRES_PASSWORD: webrag
+    ports:
+      - "5432:5432"
+    volumes:
+      - webrag_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U webrag -d webrag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  webrag_pgdata:

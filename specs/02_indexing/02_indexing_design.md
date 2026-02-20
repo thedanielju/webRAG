@@ -83,9 +83,9 @@ Stores both parent and child chunks. Children reference their parent via `parent
 | `html_text` | text \| null | HTML representation of this chunk; populated only when one or more rich content flags require it; null otherwise |
 | `has_table` | bool | true if chunk contains a markdown table or HTML `<table>` |
 | `has_code` | bool | true if chunk contains a fenced code block |
-| `has_math` | bool | true if chunk contains block LaTeX (`$$...$$`) |
-| `has_definition_list` | bool | true if chunk contains a definition list (`term:\n    definition` pattern or `<dl>` tag) |
-| `has_admonition` | bool | true if chunk contains a callout or admonition (`> **Note:**`, `> **Warning:**`, etc.) |
+| `has_math` | bool | true if chunk contains math content (detected via MathML `<math>` tags, MathJax `<mjx-*>` elements, or `MathJax`/`katex`/`math` CSS classes in HTML; Firecrawl strips LaTeX from markdown so detection is HTML-only) |
+| `has_definition_list` | bool | true if chunk contains a definition list (detected via HTML `<dl>` tag; Firecrawl does not produce markdown definition-list syntax) |
+| `has_admonition` | bool | true if chunk contains a callout or admonition (markdown: bare keyword line like `Note`, `Warning`, `Tip`, etc.; HTML: `<div class="admonition ...">` or elements with `admonition`/`note`/`warning`/`tip`/`important`/`caution`/`danger`/`info` CSS classes) |
 | `has_steps` | bool | true if chunk contains a numbered step sequence (ordered list used procedurally) |
 | `char_start` | int | character offset of chunk_text start within the document's full markdown |
 | `char_end` | int | character offset of chunk_text end within the document's full markdown |
@@ -133,16 +133,21 @@ Firecrawl returns both markdown and HTML. Markdown is the primary embedding surf
 |---|---|---|---|
 | Tables | Loses alignment and complex cell content | `has_table` | Yes — HTML is authoritative |
 | Code blocks | Preserved as fenced blocks | `has_code` | Yes — for rendering fidelity |
-| Block LaTeX (`$$...$$`) | Preserved inline | `has_math` | No — markdown sufficient |
-| Definition lists | Degrades badly in markdown | `has_definition_list` | Yes — HTML preserves structure |
-| Admonitions / callouts | Rendered as blockquotes, loses styling context | `has_admonition` | Yes — HTML preserves intent |
+| Math (LaTeX/MathJax) | Firecrawl strips all LaTeX syntax (`$`/`$$`) from markdown; equations appear as bare Unicode approximations or are dropped entirely. MathML (`<math>` tags with `<mi>`, `<mo>`, `<mn>` children) and MathJax elements are preserved in HTML only. | `has_math` | Yes — HTML is the only representation; snippet targets clean MathML `<math>` tags |
+| Definition lists | Firecrawl does not produce markdown definition-list syntax; renders as plain paragraphs | `has_definition_list` | Yes — HTML `<dl><dt><dd>` preserves structure |
+| Admonitions / callouts | Firecrawl renders as a bare keyword line (`Note`, `Warning`, etc.) followed by body text — not as blockquotes | `has_admonition` | Yes — HTML preserves intent via `<div class="admonition ...">` |
 | Numbered step sequences | Preserved as ordered lists; order semantics may lose styling | `has_steps` | No — markdown sufficient; flag signals retrieval |
 | Images | Inline as `![alt text](url)` | — | No — URL + alt text stored as-is in chunk text |
-| Inline LaTeX (`$...$`) | Preserved inline | — | No — passed through for client renderer |
 
 **Image handling:** Indexing preserves `![alt text](url)` as-is in `chunk_text`. The retrieval/MCP layer decides at response time whether to fetch and pass the image to the LLM: if the image URL appears within a retrieved chunk being sent as context, and the alt text is meaningful or the image is contextually embedded in relevant content, it is fetched and passed alongside. Otherwise alt text and URL are passed as a text reference. No vision model processing at indexing time.
 
-Retrieval selects `html_text` over `chunk_text` for rendering when `has_table`, `has_code`, `has_definition_list`, or `has_admonition` are true. `html_text` is null when no flags requiring it are true, keeping storage lean.
+Retrieval selects `html_text` over `chunk_text` for rendering when `has_table`, `has_code`, `has_math`, `has_definition_list`, or `has_admonition` are true. `html_text` is null when no flags requiring it are true, keeping storage lean.
+
+**Detection coverage (finalized — updated after Firecrawl output audit):**
+- Math: HTML-only detection. Firecrawl strips all LaTeX (`$`/`$$`) from markdown. Detection checks for MathML `<math>` tags, MathJax 3 `<mjx-*>` custom elements, and `MathJax`/`katex`/`math` CSS classes. HTML snippet extraction targets clean MathML `<math>` tags (containing `<mi>`, `<mo>`, `<mn>` etc.) and excludes MathJax visual rendering elements (`<mjx-math>`, `<mjx-container>`).
+- Definition lists: HTML-only detection via `<dl>` tags. Firecrawl does not produce markdown definition-list syntax (`term:\n    definition`); it renders definitions as plain paragraphs.
+- Admonitions: Markdown detection matches Firecrawl's bare keyword format — a standalone line containing `Note`, `Warning`, `Important`, `Tip`, `Caution`, `Danger`, `Info`, `Success`, `Example`, `See also`, or `Deprecated since`. HTML detection via CSS classes containing `admonition`, `note`, `warning`, `tip`, `important`, `caution`, `danger`, or `info`.
+- Steps: detect ordered lists using `1.` and `1)` markers, including nested ordered lists.
 
 ---
 
@@ -154,7 +159,7 @@ Each child chunk's text is passed through an embedding model — a neural networ
 
 ### Provider Configuration
 
-The indexing layer calls a single interface — `embed(text: str) -> list[float]` — and does not know or care which backend is running. Configuration is `base_url` + `model_name` + optional `api_key`, using the OpenAI-compatible `/v1/embeddings` endpoint that all major providers share. This means any OpenAI-compatible local server (Ollama, LM Studio, HuggingFace TGI) works as a drop-in with no code changes.
+The indexing layer calls a single interface — `embed_texts(texts: list[str]) -> list[list[float]]` — and does not know or care which backend is running. Configuration is `base_url` + `model_name` + optional `api_key`, using the OpenAI-compatible `/v1/embeddings` endpoint that all major providers share. This means any OpenAI-compatible local server (Ollama, LM Studio, HuggingFace TGI) works as a drop-in with no code changes.
 
 | Backend | base_url | model_name | api_key |
 |---|---|---|---|
@@ -163,6 +168,26 @@ The indexing layer calls a single interface — `embed(text: str) -> list[float]
 | LM Studio / TGI / other | user-configured | user-configured | optional |
 
 **Default: OpenAI `text-embedding-3-small`.** At worst-case WebRAG scale (thousands of pages, ~20 child chunks each, ~256 tokens per chunk), embedding cost is on the order of cents. Self-hosting on a capable GPU (RTX 5070 or equivalent, 12GB VRAM) is a legitimate zero-cost alternative — `nomic-embed-text` (768 dims, ~550MB VRAM) and `bge-m3` (1024 dims, ~2.3GB VRAM) match frontier embedding quality at WebRAG's scale and run comfortably within VRAM constraints.
+
+### Transport and Concurrency
+
+`embed_texts()` splits the full text list into batches of `EMBEDDING_BATCH_SIZE` (default 256 texts) and sends them concurrently via `ThreadPoolExecutor` with at most `EMBEDDING_MAX_WORKERS` threads (default 4). This stays within the sync `def` contract — no asyncio — while reducing wall-clock embedding time by ~5x for large chunk sets (e.g. 1200 chunks: ~70s → ~10-15s).
+
+Single-batch calls (≤256 texts) skip the executor entirely to avoid overhead.
+
+If any batch fails (timeout, 429, dimension mismatch), the entire `embed_texts()` call fails immediately — no partial vectors are returned. `index_batch()` depends on this all-or-nothing guarantee to prevent inconsistent chunk state in Postgres.
+
+**Configuration** (via `.env` / `config.py`):
+- `EMBEDDING_BATCH_SIZE` — texts per API request (default 256). Balances HTTP overhead against per-request latency.
+- `EMBEDDING_MAX_WORKERS` — max concurrent threads (default 4). Conservative for OpenAI rate limits; increase for higher-tier plans or local servers.
+
+### DB Write Performance
+
+Chunk inserts use `cursor.executemany()` instead of per-row `cursor.execute()` loops. `executemany` sends the parameterised INSERT once and streams all row data in a single client-server round-trip, reducing write time from ~3s to <0.5s for 1000+ chunk batches. Semantic behaviour is identical.
+
+### Chunking/Embedding Overlap
+
+For multi-document `index_batch()` calls, chunking of subsequent documents proceeds in the main thread while embedding of already-chunked documents runs in a background thread. This is safe because chunking is pure CPU work with no shared mutable state, and `embed_texts()` operates on an independent list of strings. For single-document calls, the overlap is skipped.
 
 ### Tokenizer
 
@@ -211,7 +236,7 @@ Indexing provides the following fields that retrieval should use for scoring, fi
 | `depth` | documents | Depth-based scoring; seed pages (depth=0) warrant higher base trust |
 | `fetched_at` | documents | Recency signal; more recently fetched pages may be more current |
 | `description` | documents | Page-level summary for traversal diagram labels; link scoring primary signal (URL path is fallback) |
-| `has_table`, `has_code`, `has_math`, `has_definition_list`, `has_admonition`, `has_steps` | chunks | Surface selection and rendering hints; retrieval prefers `html_text` for `has_table`, `has_code`, `has_definition_list`, `has_admonition` |
+| `has_table`, `has_code`, `has_math`, `has_definition_list`, `has_admonition`, `has_steps` | chunks | Surface selection and rendering hints; retrieval prefers `html_text` for `has_table`, `has_code`, `has_math`, `has_definition_list`, `has_admonition` |
 | `chunk_index` | chunks | Reading order; adjacent children under the same parent can be merged before passing to LLM |
 | `section_heading` | chunks | Coarse filtering and citation labeling; null for fallback-chunked content |
 | `source_url` | chunks | Denormalized for fast citation lookup without join |

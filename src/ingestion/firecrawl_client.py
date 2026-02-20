@@ -7,16 +7,15 @@ from urllib.parse import urldefrag, urlparse
 from typing import Any
 
 from firecrawl import FirecrawlApp
-from config import (
-    FIRECRAWL_API_KEY,
-    FIRECRAWL_DEFAULT_SCRAPE_OPTIONS,
-    FIRECRAWL_MAP_DEFAULT_LIMIT,
-)
+from config import settings
 
-app = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+if not settings.firecrawl_api_key:
+    raise RuntimeError("Missing FIRECRAWL_API_KEY - please set it in your environment or .env")
+
+app = FirecrawlApp(api_key=settings.firecrawl_api_key)
 
 # Keep a local alias so callers can inspect runtime defaults from this module.
-DEFAULT_SCRAPE_OPTIONS: dict[str, Any] = FIRECRAWL_DEFAULT_SCRAPE_OPTIONS
+DEFAULT_SCRAPE_OPTIONS: dict[str, Any] = settings.firecrawl_default_scrape_options
 
 # URL string input, optional dict of options to override defaults
 # options parameters exists so callers can later override specific defaults
@@ -88,7 +87,7 @@ def batch_scrape(urls: list[str], options: dict[str, Any] | None = None) -> list
 
     return ordered_documents
 
-def map(url: str, limit: int = FIRECRAWL_MAP_DEFAULT_LIMIT) -> list[Any]:
+def map(url: str, limit: int = settings.firecrawl_map_default_limit) -> list[Any]:
     response = app.map(url, limit=limit)  # cap candidate link volume for orchestration
 
     if isinstance(response, list):

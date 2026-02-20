@@ -18,6 +18,7 @@ dependencies = [
     "beautifulsoup4",
     "lxml",
     "pydantic",
+    "pydantic-settings",
 ]
 
 [tool.setuptools.packages.find]
