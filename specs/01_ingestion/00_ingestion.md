@@ -21,6 +21,18 @@ proxy: "auto"
 will NOT request: rawHtml, screenshot, json (LLM extraction), 
 summary (LLM-based), images (format) - image URLs appear inline in markdown
 
+batch_scrape wrappers:
+
+batch_scrape(urls: list[str], options: dict = None) -> list[Document]:
+- calls app.batch_scrape(urls, **merged_options) using DEFAULT_SCRAPE_OPTIONS
+- blocking waiter - returns when all pages complete
+- returns list of Document objects (same type as scrape())
+- failed individual URLs return None in the list; don't raise on partial failure
+
+NOTE: batch_scrape is the right default for ingest_batch.
+start_batch_scrape + polling is only needed if we want non-blocking behavior later.
+Don't implement manual pagination wrappers now, auto-pagination default handles it.
+
 # service.py:
 ingestion logic, normalization, output schema:
 

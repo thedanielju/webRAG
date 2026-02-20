@@ -20,6 +20,12 @@ crawl_timestamp
 
 4. +1 hierarchy is very good - constraint prevents crawl explosion(?)
 
+5. Most relevant beyond PDFs:
+- Pages that trigger file downloads (Content-Disposition: attachment) but are not PDFs.
+- Office docs (.docx, .pptx, .xlsx) and similar binaries.
+- Plain text/CSV/XML endpoints that aren’t normal HTML pages.
+- Media-heavy URLs (images/video/audio) that may yield sparse or no useful markdown.
+
 ## general design plan:
 building is slice-based - one thin end to end path first, then deepen layers
 
