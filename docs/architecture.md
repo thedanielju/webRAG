@@ -34,6 +34,18 @@ WebRAG is designed to:
 1. Firecrawl solves the reliable acquiistion of web content and is integrated in WebRAG
 2. WebRAG reasons over evolving web corpora - key features include selective recursion, corpus growth strategy, retrieval policy, citation rigor, and stopping criteria
 
+## CONFIGURATION LAYER
+Configuration is centralized in `config.py` and imported by feature modules.
+
+Current ingestion-related config includes:
+- `FIRECRAWL_API_KEY` loading/validation
+- Firecrawl default scrape options (formats, PDF parser, timeout, proxy, ad/image cleanup)
+- default map/discovery limits used by ingestion wrappers
+
+Principle:
+- configuration and secrets live in one place
+- ingestion/indexing/retrieval modules only consume typed constants and do not read env vars directly
+
 ## INGESTION LAYER
 Responsibilities:
 - Fetch pages permitted for retrieval

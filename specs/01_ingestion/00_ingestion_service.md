@@ -3,6 +3,9 @@
 future: swap internals to batch_scrape firecrawl endpoint, ingest should accept a list of URLs, not just one - orchestration has a ingest top candidates step to pass a batch
 current: sequential scrape calls
 
+Configuration note:
+- API key and Firecrawl defaults are not handled in service.py; they are centralized in `config.py` and consumed by `firecrawl_client.py`.
+
 1. Detect doc_type: check URL suffix, default to html
 - we can't check content-type before scrape; and already handled after scrape
 2. Call firecrawl_client.scrape(url)
@@ -22,6 +25,8 @@ current: sequential scrape calls
 ## discover_links(url: str, limit: int = 500, exclude: set[str] = None) -> list[LinkCandidate]
 orchestration tracks visited URLs to avoid re-ingesting. rather than making orchestration filter after the fact, pass a seen set into discover_links():
 Filter out any LinkCandidate whose URL is in exclude before returning. Keeps deduplication logic close to where links are discovered.
+
+Default `limit` should come from `config.py` so operators can tune discovery volume without touching service logic.
 
 1. Call firecrawl_client.map(url, limit=limit)
     - accept limit and pass it through to firecrawl_client.map() so orchestration can control volume

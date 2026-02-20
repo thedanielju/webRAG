@@ -3,33 +3,20 @@
 
 from __future__ import annotations
 
-import os
 from urllib.parse import urldefrag, urlparse
 from typing import Any
 
-from dotenv import load_dotenv
 from firecrawl import FirecrawlApp
+from config import (
+    FIRECRAWL_API_KEY,
+    FIRECRAWL_DEFAULT_SCRAPE_OPTIONS,
+    FIRECRAWL_MAP_DEFAULT_LIMIT,
+)
 
-load_dotenv()
+app = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
 
-# api key management
-_FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
-if not _FIRECRAWL_API_KEY:
-    raise RuntimeError(
-        "Missing FIRECRAWL_API_KEY - please set it in your environment or .env"
-    )
-
-app = FirecrawlApp(api_key=_FIRECRAWL_API_KEY)
-
-DEFAULT_SCRAPE_OPTIONS: dict[str, Any] = {
-    "formats": [{"type": "markdown"}, {"type": "html"}, {"type": "links"}],
-    "only_main_content": True,
-    "parsers": [{"type": "pdf"}],
-    "timeout": 30000, # 30s
-    "block_ads": True,
-    "remove_base64_images": True,
-    "proxy": "auto",
-}
+# Keep a local alias so callers can inspect runtime defaults from this module.
+DEFAULT_SCRAPE_OPTIONS: dict[str, Any] = FIRECRAWL_DEFAULT_SCRAPE_OPTIONS
 
 # URL string input, optional dict of options to override defaults
 # options parameters exists so callers can later override specific defaults
@@ -101,7 +88,7 @@ def batch_scrape(urls: list[str], options: dict[str, Any] | None = None) -> list
 
     return ordered_documents
 
-def map(url: str, limit: int = 100) -> list[Any]:
+def map(url: str, limit: int = FIRECRAWL_MAP_DEFAULT_LIMIT) -> list[Any]:
     response = app.map(url, limit=limit)  # cap candidate link volume for orchestration
 
     if isinstance(response, list):

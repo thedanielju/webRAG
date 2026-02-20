@@ -26,6 +26,8 @@ crawl_timestamp
 - Plain text/CSV/XML endpoints that aren’t normal HTML pages.
 - Media-heavy URLs (images/video/audio) that may yield sparse or no useful markdown.
 
+6. No image content is processed at indexing time. A vision model pass is a future enhancement.
+
 ## general design plan:
 building is slice-based - one thin end to end path first, then deepen layers
 
