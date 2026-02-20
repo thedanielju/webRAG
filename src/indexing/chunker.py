@@ -218,6 +218,17 @@ def _merge_flags(a: RichContentFlags, b: RichContentFlags) -> RichContentFlags:
     )
 
 
+def _aggregate_flags_from_children(children: list[Chunk]) -> RichContentFlags:
+    return RichContentFlags(
+        has_table=any(child.flags.has_table for child in children),
+        has_code=any(child.flags.has_code for child in children),
+        has_math=any(child.flags.has_math for child in children),
+        has_definition_list=any(child.flags.has_definition_list for child in children),
+        has_admonition=any(child.flags.has_admonition for child in children),
+        has_steps=any(child.flags.has_steps for child in children),
+    )
+
+
 def _should_store_html(flags: RichContentFlags) -> bool:
     return (
         flags.has_table
@@ -327,6 +338,52 @@ def _extract_html_snippet(
     if best_tag is None:
         return None
     return str(best_tag)
+
+
+def _enrich_parent_chunks_with_rich_content(
+    parents: list[Chunk],
+    children: list[Chunk],
+    full_html: str | None,
+) -> None:
+    if not parents or not children:
+        return
+
+    children_by_parent: dict[object, list[Chunk]] = {}
+    for child in children:
+        if child.parent_id is None:
+            continue
+        children_by_parent.setdefault(child.parent_id, []).append(child)
+
+    html_soup = _soup_from_html(full_html) if full_html else None
+    html_candidates: list[Tag] | None = None
+    prepared_candidates: list[tuple[Tag, set[str]]] | None = None
+    if html_soup:
+        html_candidates = _collect_html_candidates(html_soup)
+        prepared_candidates = _prepare_candidate_tokens(html_candidates)
+
+    for parent in parents:
+        parent_children = children_by_parent.get(parent.id, [])
+        if not parent_children:
+            continue
+
+        parent.flags = _aggregate_flags_from_children(parent_children)
+        if not _should_store_html(parent.flags):
+            parent.html_text = None
+            continue
+
+        parent_html = _extract_html_snippet(
+            parent.chunk_text,
+            html_soup,
+            parent.flags,
+            html_candidates,
+            prepared_candidates,
+        )
+        if parent_html is None:
+            for child in parent_children:
+                if child.html_text:
+                    parent_html = child.html_text
+                    break
+        parent.html_text = parent_html
 
 # Text splitting (_recursive_token_split, _greedy_word_split, _split_keep_separator)
 # fallback chain for oversized text. Tries splitting on \n\n, then \n, then . , then  . If even single words exceed the token limit 
@@ -693,6 +750,7 @@ def build_chunks(
             title=title,
             depth=depth,
         )
+        _enrich_parent_chunks_with_rich_content(fallback_parents, fallback_children, html)
         return fallback_parents, fallback_children
 
     parent_chunks = _parent_chunks_from_sections(
@@ -706,5 +764,7 @@ def build_chunks(
     child_chunks: list[Chunk] = []
     for parent in parent_chunks:
         child_chunks.extend(_child_chunks_from_parent(parent, html))
+
+    _enrich_parent_chunks_with_rich_content(parent_chunks, child_chunks, html)
 
     return parent_chunks, child_chunks

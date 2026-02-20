@@ -243,6 +243,49 @@ class TestIndexingIntegration:
         assert (code_count or 0) > 0
         assert (table_count or 0) > 0
 
+    def test_parent_rich_content_propagated_on_scikit(self, db_conn, indexed_corpus):
+        scikit_source = indexed_corpus["source_urls"][0]
+        with db_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM chunks
+                WHERE source_url = %s
+                  AND chunk_level = 'parent'
+                  AND (
+                    has_table
+                    OR has_code
+                    OR has_math
+                    OR has_definition_list
+                    OR has_admonition
+                  )
+                """,
+                (scikit_source,),
+            )
+            flagged_parent_count = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM chunks
+                WHERE source_url = %s
+                  AND chunk_level = 'parent'
+                  AND (
+                    has_table
+                    OR has_code
+                    OR has_math
+                    OR has_definition_list
+                    OR has_admonition
+                  )
+                  AND html_text IS NULL
+                """,
+                (scikit_source,),
+            )
+            flagged_missing_html = cur.fetchone()[0]
+
+        assert flagged_parent_count > 0
+        assert flagged_missing_html == 0
+
     def test_depth_persisted_correctly(self, db_conn, indexed_corpus):
         scikit_source, factual_source, unrelated_source = indexed_corpus["source_urls"]
         with db_conn.cursor() as cur:

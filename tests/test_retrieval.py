@@ -132,36 +132,24 @@ class TestRetrievalIntegration:
         for indexes in by_source.values():
             assert indexes == sorted(indexes)
 
-    def test_surface_selection_prefers_html_when_flags_present(self):
-        from src.retrieval.search import _choose_surface
+    def test_surface_selection_prefers_html_when_flags_present(self, db_conn):
+        with _override_settings(
+            retrieval_full_context_threshold=10_000_000,
+            retrieval_context_budget=10_000_000,
+        ):
+            result = retrieve(db_conn, "mathematical notation and formulas")
 
-        # NOTE: Parent chunks currently lack rich-content flags and html_text (indexing gap).
-        # Testing surface selection with synthetic rows until indexing propagates flags to parents.
-        flagged_row = {
-            "chunk_text": "plain markdown",
-            "html_text": "<table><tr><td>x</td></tr></table>",
-            "has_table": True,
-            "has_code": False,
-            "has_math": False,
-            "has_definition_list": False,
-            "has_admonition": False,
-        }
-        selected_text, surface = _choose_surface(flagged_row)
-        assert surface == "html"
-        assert selected_text == flagged_row["html_text"]
-
-        fallback_row = {
-            "chunk_text": "plain markdown",
-            "html_text": None,
-            "has_table": True,
-            "has_code": False,
-            "has_math": False,
-            "has_definition_list": False,
-            "has_admonition": False,
-        }
-        selected_text, surface = _choose_surface(fallback_row)
-        assert surface == "markdown"
-        assert selected_text == fallback_row["chunk_text"]
+        flagged = [
+            chunk
+            for chunk in result.chunks
+            if chunk.has_math
+            or chunk.has_table
+            or chunk.has_code
+            or chunk.has_definition_list
+            or chunk.has_admonition
+        ]
+        assert len(flagged) > 0
+        assert any(chunk.surface == "html" for chunk in flagged)
 
     def test_chunk_mode_semantic_match(self, db_conn, indexed_corpus):
         scikit_source = indexed_corpus["source_urls"][0]
