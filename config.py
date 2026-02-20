@@ -63,5 +63,37 @@ class Settings(BaseSettings):
     child_target_tokens: int = Field(default=256, validation_alias="CHILD_TARGET_TOKENS")
     parent_max_tokens: int = Field(default=1000, validation_alias="PARENT_MAX_TOKENS")
 
+    # Retrieval
+    # Total corpus tokens below this threshold switch retrieval to full-context mode.
+    # Must be <= retrieval_context_budget; retrieval clamps at runtime if misconfigured.
+    retrieval_full_context_threshold: int = Field(
+        default=30000, validation_alias="RETRIEVAL_FULL_CONTEXT_THRESHOLD"
+    )
+    # Hard cap on total context tokens retrieval is allowed to return.
+    # Must be >= retrieval_full_context_threshold.
+    retrieval_context_budget: int = Field(
+        default=40000, validation_alias="RETRIEVAL_CONTEXT_BUDGET"
+    )
+    # Ceiling on child hits pulled from HNSW before parent aggregation.
+    retrieval_top_k_children_limit: int = Field(
+        default=60, validation_alias="RETRIEVAL_TOP_K_CHILDREN_LIMIT"
+    )
+    # Minimum cosine similarity required for a child hit to survive filtering.
+    retrieval_similarity_floor: float = Field(
+        default=0.3, validation_alias="RETRIEVAL_SIMILARITY_FLOOR"
+    )
+    # Linear penalty per crawl depth level when ranking parent candidates.
+    retrieval_depth_decay_rate: float = Field(
+        default=0.05, validation_alias="RETRIEVAL_DEPTH_DECAY_RATE"
+    )
+    # Minimum multiplier for depth penalty so deep pages are not zeroed out.
+    retrieval_depth_floor: float = Field(
+        default=0.80, validation_alias="RETRIEVAL_DEPTH_FLOOR"
+    )
+    # pgvector HNSW recall knob (higher = better recall, slightly slower).
+    retrieval_hnsw_ef_search: int = Field(
+        default=100, validation_alias="RETRIEVAL_HNSW_EF_SEARCH"
+    )
+
 
 settings = Settings()

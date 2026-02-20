@@ -289,3 +289,8 @@ def annotate_token_offsets(chunks: list[Chunk], markdown: str) -> None:
             end_index = start_index
         chunk.token_start = boundaries[start_index]
         chunk.token_end = boundaries[end_index]
+
+
+def embed_query(text: str) -> list[float]:
+    """Embed a single retrieval query string."""
+    return embed_texts([text])[0]
