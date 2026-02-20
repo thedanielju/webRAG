@@ -7,9 +7,16 @@ no recursion, no link selection, no persistence
 
 # firecrawl_client.py: 
 Firecrawl API wrapper, config, auth
-1. load API key from env
+1. read API key and defaults from `config.py` (single config boundary)
 2. Default request config
 3. expose scrape(url, options), map(url)
+
+# config.py:
+Centralized user configuration for ingestion and Firecrawl integration:
+- env loading and `FIRECRAWL_API_KEY` validation
+- `FIRECRAWL_DEFAULT_SCRAPE_OPTIONS`
+- `FIRECRAWL_MAP_DEFAULT_LIMIT`
+- `INGEST_DISCOVER_LINKS_DEFAULT_LIMIT`
 
 default scrape formats: ["markdown", "html", "links"]
 onlyMainContent: true  (strips nav/footer noise)
@@ -88,6 +95,7 @@ firecrawl also supports returning HTML for table and code blocks
 ## ERROR HANDLING
 - per endpoint (scrape, map)
 - HTTP errors, Firecrawl API errors, malformed responses
+- missing API key is raised from `config.py` at startup/import time
 
 ## WHY NOT CRAWL?
 crawl is better for simple cases, handling concurrency, deduplication, depth management. it's genuinely good; however, i decided to implement my own

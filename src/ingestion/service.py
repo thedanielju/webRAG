@@ -6,6 +6,7 @@ import hashlib # generates content_hash
 from typing import Any
 from urllib.parse import urldefrag, urlparse
 
+from config import settings
 from src.ingestion import firecrawl_client
 
 
@@ -178,7 +179,7 @@ def ingest_batch(urls: list[str]) -> list[NormalizedDocument | None]:
 
 # Takes a URL, optional limit for how many links to fetch, optional set of URLs to exclude. Returns a list of LinkCandidate objects.
 def discover_links(
-    url: str, limit: int = 500, exclude: set[str] | None = None
+    url: str, limit: int = settings.ingest_discover_links_default_limit, exclude: set[str] | None = None
 ) -> list[LinkCandidate]:
     links = firecrawl_client.map(url, limit=limit)
 

@@ -26,6 +26,10 @@ crawl_timestamp
 - Plain text/CSV/XML endpoints that aren’t normal HTML pages.
 - Media-heavy URLs (images/video/audio) that may yield sparse or no useful markdown.
 
+6. No image content is processed at indexing time. A vision model pass is a future enhancement.
+
+7. Re-add LaTeX markdown regex (`$$`/`$`) to `_detect_markdown_flags` if a non-Firecrawl ingestion path is added (e.g. raw HTML fetch, local file import). Currently hardcoded to False because Firecrawl strips all LaTeX from markdown.
+
 ## general design plan:
 building is slice-based - one thin end to end path first, then deepen layers
 

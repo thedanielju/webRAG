@@ -10,6 +10,15 @@ dependencies = [
     "firecrawl-py==4.16.0",
     "python-dotenv",
     "pytest",
+    "psycopg[binary]",
+    "pgvector",
+    "openai",
+    "tiktoken",
+    "transformers",
+    "beautifulsoup4",
+    "lxml",
+    "pydantic",
+    "pydantic-settings",
 ]
 
 [tool.setuptools.packages.find]
