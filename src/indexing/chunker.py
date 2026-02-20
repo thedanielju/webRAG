@@ -244,7 +244,7 @@ def _text_overlap_score(a: str, b: str) -> int:
         return 0
     return len(a_tokens & b_tokens)
 
-# HTML extraction: when _should_store_html is true (table, code, definition list, or admonition present),
+# HTML extraction: when _should_store_html is true (table, code, math, definition list, or admonition present),
 # finds the best-matching HTML element, then narrows further to the specific flagged sub-element 
 # (e.g. the <table> inside it) and returns its raw HTML string - stored in html_text.
 #
