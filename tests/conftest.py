@@ -15,11 +15,12 @@ def _schema_exists(conn: Any) -> bool:
             """
             SELECT
                 to_regclass('public.documents') IS NOT NULL,
-                to_regclass('public.chunks') IS NOT NULL
+                to_regclass('public.chunks') IS NOT NULL,
+                to_regclass('public.link_candidates') IS NOT NULL
             """
         )
         row = cur.fetchone()
-    return bool(row and row[0] and row[1])
+    return bool(row and row[0] and row[1] and row[2])
 
 
 @pytest.fixture(scope="session")
@@ -75,6 +76,7 @@ def reset_index_tables(db_conn: Any):
     def _reset() -> None:
         with db_conn.transaction():
             with db_conn.cursor() as cur:
+                cur.execute("TRUNCATE TABLE link_candidates CASCADE;")
                 cur.execute("TRUNCATE TABLE chunks CASCADE;")
                 cur.execute("TRUNCATE TABLE documents CASCADE;")
 

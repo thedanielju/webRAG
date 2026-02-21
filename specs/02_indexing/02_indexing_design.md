@@ -97,6 +97,17 @@ Stores both parent and child chunks. Children reference their parent via `parent
 
 **Rich content flag detection** happens at chunk creation time via pattern matching on chunk text and HTML — no external calls. `html_text` is populated whenever any flag that benefits from it is true, giving retrieval a higher-fidelity rendering surface for those chunks.
 
+### Parent Rich-Content Propagation (Implemented)
+
+Parent chunks are the context unit returned to the LLM, so parent rows must carry rich-content signals too.
+
+After child chunking, indexing now performs a parent enrichment pass:
+- Parent flags are aggregated from children using `any(...)` semantics.
+- If a parent is rich-content flagged (`has_table`, `has_code`, `has_math`, `has_definition_list`, `has_admonition`), parent `html_text` is populated.
+- Parent `html_text` is extracted from the best matching parent HTML context when possible, with fallback to a child's `html_text` when extraction is ambiguous.
+
+This guarantees retrieval surface selection can make correct parent-level decisions without joining child rows at query time.
+
 ---
 
 ## Chunking Strategy
@@ -142,6 +153,8 @@ Firecrawl returns both markdown and HTML. Markdown is the primary embedding surf
 **Image handling:** Indexing preserves `![alt text](url)` as-is in `chunk_text`. The retrieval/MCP layer decides at response time whether to fetch and pass the image to the LLM: if the image URL appears within a retrieved chunk being sent as context, and the alt text is meaningful or the image is contextually embedded in relevant content, it is fetched and passed alongside. Otherwise alt text and URL are passed as a text reference. No vision model processing at indexing time.
 
 Retrieval selects `html_text` over `chunk_text` for rendering when `has_table`, `has_code`, `has_math`, `has_definition_list`, or `has_admonition` are true. `html_text` is null when no flags requiring it are true, keeping storage lean.
+
+Because parent flags and parent `html_text` are now propagated during indexing, this selection works correctly in both full-context mode and chunk mode (both return parent chunks).
 
 **Detection coverage (finalized — updated after Firecrawl output audit):**
 - Math: HTML-only detection. Firecrawl strips all LaTeX (`$`/`$$`) from markdown. Detection checks for MathML `<math>` tags, MathJax 3 `<mjx-*>` custom elements, and `MathJax`/`katex`/`math` CSS classes. HTML snippet extraction targets clean MathML `<math>` tags (containing `<mi>`, `<mo>`, `<mn>` etc.) and excludes MathJax visual rendering elements (`<mjx-math>`, `<mjx-container>`).

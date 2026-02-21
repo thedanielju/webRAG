@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+"""Retrieval pipeline for WebRAG.
+
+High-level flow:
+1. Determine corpus mode (full_context vs chunk) from parent token span.
+2. Return early without embedding when corpus is empty (cost guard).
+3. Embed query once.
+4. Execute either:
+   - full_context parent load (ordered, budgeted), or
+   - chunk-mode child ANN search + parent aggregation + budgeting.
+5. Apply deterministic surface selection (html vs markdown) per returned parent.
+6. Return a structured RetrievalResult for orchestration.
+"""
+
 from collections import defaultdict
 from time import perf_counter
 from typing import Any
@@ -132,6 +145,11 @@ def _load_corpus_counts(conn: Connection, source_urls: list[str] | None) -> tupl
 
 
 def _choose_surface(row: dict[str, Any]) -> tuple[str, str]:
+    """Choose the best render surface for a retrieved chunk row.
+
+    HTML is preferred only when rich-content flags indicate it provides higher
+    fidelity and html_text is available. Otherwise markdown is returned.
+    """
     use_html = (
         bool(row["has_table"])
         or bool(row["has_code"])
@@ -239,7 +257,13 @@ def _run_hnsw_child_search(
     query_embedding: list[float],
     source_urls: list[str] | None,
 ) -> list[dict[str, Any]]:
-    """Run child ANN query using the partial child-embedding HNSW index."""
+    """Run child ANN search on embedded child chunks.
+
+    Notes:
+    - Uses the partial HNSW index on child embeddings.
+    - Applies similarity floor as a cosine distance threshold.
+    - Sets transaction-local hnsw.ef_search via set_config().
+    """
     distance_threshold = _distance_threshold_from_similarity_floor()
     with conn.cursor(row_factory=dict_row) as cur:
         # pgvector recall/speed control; set transaction-locally.
@@ -336,6 +360,12 @@ def _build_chunk_mode_results(
     source_urls: list[str] | None,
     context_budget: int,
 ) -> list[RetrievedChunk]:
+    """Build parent-level results from child ANN hits.
+
+    Children are scored first, then aggregated to parents with max-score
+    semantics. Parent results are budgeted by token span and always return at
+    least one hit when ANN produced any candidate.
+    """
     with conn.transaction():
         child_rows = _run_hnsw_child_search(conn, query_embedding, source_urls)
 
@@ -391,6 +421,7 @@ def _build_full_context_results(
     source_urls: list[str] | None,
     context_budget: int,
 ) -> list[RetrievedChunk]:
+    """Load ordered parent chunks directly for small-corpus mode."""
     rows = _query_full_context_parents(conn, source_urls)
     if not rows:
         return []
@@ -420,6 +451,11 @@ def retrieve(
     - conn is an active psycopg3 connection to the WebRAG database
     - register_vector(conn) has already been called by the caller
     - schema has already been initialized by indexing
+
+    Behavior:
+    - Empty corpus short-circuits before embedding to avoid unnecessary cost.
+    - Full-context mode returns ordered parent chunks with score=1.0.
+    - Chunk mode performs child ANN search and returns ranked parent chunks.
     """
     started = perf_counter()
     normalized_source_urls = _normalize_source_urls(source_urls)

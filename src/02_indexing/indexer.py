@@ -86,11 +86,12 @@ def _ensure_schema_initialized(conn: Connection) -> None:
             """
             SELECT
                 to_regclass('public.documents') IS NOT NULL,
-                to_regclass('public.chunks') IS NOT NULL
+                to_regclass('public.chunks') IS NOT NULL,
+                to_regclass('public.link_candidates') IS NOT NULL
             """
         )
         row = cur.fetchone()
-    schema_exists = bool(row and row[0] and row[1])
+    schema_exists = bool(row and row[0] and row[1] and row[2])
 
     if schema_exists:
         _SCHEMA_INITIALIZED = True
@@ -235,6 +236,50 @@ def _insert_chunks(conn: Connection, chunks: list[Chunk]) -> None:
         )
 
 
+def _insert_link_candidates(
+    conn: Connection,
+    document_id: object,
+    source_url: str,
+    links: list[str],
+    depth: int,
+) -> None:
+    """Bulk-insert URL-only link candidate rows for a document.
+
+    Uses ON CONFLICT DO NOTHING so re-indexing the same document
+    (after content_hash change) gracefully skips duplicate links.
+    Title and description start as NULL — they are populated later
+    by enrich_link_candidates() when orchestration needs scoring
+    metadata.
+    """
+    if not links:
+        return
+
+    params_list = [
+        {
+            "source_document_id": document_id,
+            "source_url": source_url,
+            "target_url": target_url,
+            "depth": depth,
+        }
+        for target_url in links
+    ]
+
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO link_candidates (
+                source_document_id, source_url, target_url, depth
+            )
+            VALUES (
+                %(source_document_id)s, %(source_url)s,
+                %(target_url)s, %(depth)s
+            )
+            ON CONFLICT (source_document_id, target_url) DO NOTHING
+            """,
+            params_list,
+        )
+
+
 def _build_doc_chunks(
     doc: NormalizedDocument, depth: int, document_id: object
 ) -> tuple[list[Chunk], list[Chunk]]:
@@ -374,6 +419,7 @@ def index_batch(docs: list[NormalizedDocument], depths: list[int]) -> None:
                         "payload": payload,
                         "parent_chunks": parent_chunks,
                         "child_chunks": child_chunks,
+                        "links": list(doc.links) if doc.links else [],
                     }
                 )
 
@@ -451,6 +497,18 @@ def index_batch(docs: list[NormalizedDocument], depths: list[int]) -> None:
                 _insert_document(conn, payload)
                 _insert_chunks(conn, parent_chunks)
                 _insert_chunks(conn, child_chunks)
+
+                # Persist outgoing links from this document for
+                # orchestration link scoring.  URL-only rows;
+                # enrichment happens on-demand via enrich_link_candidates().
+                doc_links: list[str] = item.get("links", [])
+                _insert_link_candidates(
+                    conn,
+                    document_id=payload["id"],
+                    source_url=str(payload["source_url"]),
+                    links=doc_links,
+                    depth=int(payload["depth"]),
+                )
 
         if _INDEXING_DEBUG:
             phase1 = phase2_started - phase1_started

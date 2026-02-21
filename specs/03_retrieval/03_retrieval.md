@@ -42,12 +42,13 @@ Those responsibilities belong to the orchestration layer, which consumes retriev
 
 ### Pipeline Summary
 
-1. **Embed the query** — single OpenAI-compatible API call via embed_query() wrapper
-2. **Decide mode** — full-context (small corpus) vs chunk (large corpus) based on total corpus token span
-3. **Execute search** — full-context loads all parents; chunk mode runs HNSW + parent aggregation
-4. **Apply surface selection** — flag-based html_text vs chunk_text per chunk
-5. **Build return object** — rich RetrievalResult with chunks, metadata, corpus stats, timing
-6. **Return to orchestration** — orchestration decides next action
+1. **Decide mode** — full-context (small corpus) vs chunk (large corpus) based on total corpus token span
+2. **Handle empty corpus fast path** — if total parent token span is zero, return immediately with empty results and no embedding call
+3. **Embed the query** — single OpenAI-compatible API call via embed_query() wrapper (only when corpus is non-empty)
+4. **Execute search** — full-context loads all parents; chunk mode runs HNSW + parent aggregation
+5. **Apply surface selection** — flag-based html_text vs chunk_text per chunk
+6. **Build return object** — rich RetrievalResult with chunks, metadata, corpus stats, timing
+7. **Return to orchestration** — orchestration decides next action
 
 ### Architectural Pattern: Small-to-Large Retrieval
 
@@ -339,7 +340,7 @@ def _determine_mode(
 
 **context_budget_override parameter:** Orchestration may know the model's context window (e.g., from MCP session metadata or user config). If so, it can pass a derived budget. Otherwise the default config kicks in. This is a forward-looking parameter — currently MCP does not expose model metadata, but the interface is ready when it does.
 
-**Edge case:** If total_tokens is 0 (empty corpus), mode is "full_context" and retrieval returns an empty result set. Orchestration handles this — it sees zero chunks returned and triggers ingestion.
+**Edge case:** If total_tokens is 0 (empty corpus), mode is "full_context" and retrieval returns an empty result set immediately without calling the embedding API. Orchestration handles this — it sees zero chunks returned and triggers ingestion.
 
 ---
 
@@ -411,12 +412,12 @@ Before running the HNSW query, set the recall parameter for this transaction:
 
 ```python
 conn.execute(
-    "SET LOCAL hnsw.ef_search = %s",
-    [settings.retrieval_hnsw_ef_search],
+    "SELECT set_config('hnsw.ef_search', %s, true)",
+    [str(settings.retrieval_hnsw_ef_search)],
 )
 ```
 
-SET LOCAL scopes the setting to the current transaction, so it doesn't affect other connections or subsequent queries outside the transaction. This requires the retrieval queries to run inside a transaction block.
+`set_config(..., true)` scopes the setting to the current transaction, so it doesn't affect other connections or subsequent queries outside the transaction. This requires the retrieval queries to run inside a transaction block.
 
 **Why ef_search=100 (default):** Parent aggregation after HNSW search means a missed child can cause an entire parent to be absent from results. Higher ef_search means the HNSW graph explores more neighbors, increasing the chance all relevant parents get at least one child hit. For WebRAG's typical corpus sizes (hundreds to low thousands of chunks), the latency difference between ef_search=40 (pgvector default) and 100 is sub-millisecond. The recall gain justifies the negligible cost.
 
@@ -661,14 +662,15 @@ def _select_surface(chunk_row) -> tuple[str, str]:
 
 **has_steps does NOT trigger html_text.** Steps chunks that have html_text got it from a co-occurring flag (e.g., has_code + has_steps). The has_steps flag signals retrieval/MCP for UX treatment only.
 
-### has_math and html_text Storage — Confirmed Correct
+### Parent Surface Readiness — Confirmed Correct
 
-**This is verified ground truth from the live codebase and database:**
-1. _should_store_html() in indexing includes has_math — indexing stores html_text for math chunks.
-2. _extract_html_snippet() has a has_math branch targeting MathML math tags.
-3. Retrieval's HTML_PREFERRED_FLAGS includes has_math — surface selection prefers html_text.
+Retrieval returns parent chunks in both modes, so parent rows must be surface-ready.
+This is now true in the indexing pipeline:
+1. Parent flags are aggregated from children (`any` per flag).
+2. Parent `html_text` is populated when rich-content flags require HTML.
+3. Retrieval surface selection reads parent flags/`html_text` directly.
 
-All three layers (indexing storage, HTML extraction, retrieval selection) are consistent. A future page with math content but no co-occurring code/table/admonition flags will still have html_text stored and selected correctly. The live database confirms: all 397 math-flagged chunks have html_text populated.
+All three layers (indexing storage, HTML extraction, retrieval selection) are consistent. A page with math content but no co-occurring code/table/admonition flags still has HTML stored and selected correctly at parent level.
 
 ### html_text Deduplication
 
@@ -1154,7 +1156,7 @@ No __init__.py needed — project uses pyproject.toml with implicit namespace pa
 
 - **All database access uses psycopg3** with parameterized queries (%s placeholders). No string interpolation in SQL. No f-strings in queries.
 - **Connection management:** retrieve() takes a psycopg.Connection as a parameter (same pattern as indexing). The caller manages connection lifecycle.
-- **Transaction for ef_search:** The HNSW ef_search setting requires SET LOCAL, which is scoped to the current transaction. Wrap chunk mode queries in a transaction block (with conn.transaction():).
+- **Transaction for ef_search:** Set HNSW recall with `set_config('hnsw.ef_search', ..., true)` so it is transaction-local. Wrap chunk mode queries in a transaction block (`with conn.transaction():`).
 - **Timing:** Use time.perf_counter() around embed and search sections. Report in milliseconds.
 - **UUID handling:** psycopg3 natively handles Python uuid.UUID to PostgreSQL UUID conversion. No string casting needed.
 - **Vector passing:** psycopg3 with pgvector sends embeddings as Python lists of floats. Cast to ::vector in SQL. Requires register_vector(conn) (caller's responsibility, see Connection Preconditions above).

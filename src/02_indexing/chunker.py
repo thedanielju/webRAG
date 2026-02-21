@@ -2,6 +2,16 @@
 
 from __future__ import annotations
 
+"""Chunk construction for indexing.
+
+Core responsibilities:
+- Split markdown into parent and child chunks.
+- Detect rich-content signals from markdown + HTML context.
+- Attach child-level html_text snippets when rich content exists.
+- Propagate rich-content metadata to parents so retrieval can choose the
+  correct render surface (html vs markdown) at parent return time.
+"""
+
 import re
 from datetime import datetime
 from typing import Callable
@@ -58,8 +68,6 @@ def _soup_from_html(text: str) -> BeautifulSoup:
 # via _best_matching_html_tag, then checks that element for tables, code, definition lists, admonitions.
 
 def _detect_markdown_flags(text: str) -> RichContentFlags:
-    lower = text.lower()
-
     has_table = bool(re.search(r"(?m)^\|.+\|\s*$", text))
     has_code = "```" in text
 
@@ -219,6 +227,7 @@ def _merge_flags(a: RichContentFlags, b: RichContentFlags) -> RichContentFlags:
 
 
 def _aggregate_flags_from_children(children: list[Chunk]) -> RichContentFlags:
+    """Aggregate rich-content flags from child chunks to parent-level truth."""
     return RichContentFlags(
         has_table=any(child.flags.has_table for child in children),
         has_code=any(child.flags.has_code for child in children),
@@ -345,6 +354,12 @@ def _enrich_parent_chunks_with_rich_content(
     children: list[Chunk],
     full_html: str | None,
 ) -> None:
+    """Propagate rich-content metadata and HTML surface to parent chunks.
+
+    Parents are the retrieval context unit, so they must carry:
+    - aggregated rich-content flags (any child flag -> parent flag),
+    - html_text when rich content exists, with child snippet fallback.
+    """
     if not parents or not children:
         return
 
@@ -618,7 +633,7 @@ def _child_chunks_from_parent(
         html_candidates = _collect_html_candidates(scoped_root)
         prepared_candidates = _prepare_candidate_tokens(html_candidates)
 
-    for block_text, rel_start, rel_end in paragraph_blocks:
+    for block_text, rel_start, _rel_end in paragraph_blocks:
         abs_start = parent.char_start + rel_start
 
         split_texts = _recursive_token_split(block_text, settings.child_target_tokens)
@@ -722,7 +737,12 @@ def build_chunks(
     title: str | None,
     depth: int,
 ) -> tuple[list[Chunk], list[Chunk]]:
-    """Split a document into parent and child chunks with rich-content flags."""
+    """Split one document into parent+child chunks and enrich parent metadata.
+
+    Returns:
+    - parents: context units returned by retrieval.
+    - children: embedding/search units linked to parents by parent_id.
+    """
     if not markdown:
         return [], []
 

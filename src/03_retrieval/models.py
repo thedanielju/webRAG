@@ -95,3 +95,22 @@ class RetrievalResult(BaseModel):
             seen.add(chunk.source_url)
             ordered_urls.append(chunk.source_url)
         return ordered_urls
+
+
+class PersistedLinkCandidate(BaseModel):
+    """A link candidate row from the link_candidates table.
+
+    Rows start URL-only (title/description/enriched_at NULL) and are
+    populated later via enrich_link_candidates() when orchestration
+    needs /map metadata for link scoring.
+    """
+
+    id: UUID
+    source_document_id: UUID
+    source_url: str
+    target_url: str
+    title: str | None
+    description: str | None
+    discovered_at: datetime
+    enriched_at: datetime | None
+    depth: int
