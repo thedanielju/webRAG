@@ -10,6 +10,11 @@ Provides two public functions for the orchestration layer:
   get_link_candidates(source_document_id, conn, ...)
       Fetches persisted link candidates for a source document with
       optional filtering (enriched-only, URL exclusion).
+
+Async migration:
+  Both public functions are async coroutines.  The conn parameter is an
+  AsyncConnection (psycopg3).  Internal cursor operations use
+  ``async with conn.cursor()`` and ``await cur.execute()``.
 """
 
 from __future__ import annotations
@@ -17,17 +22,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from psycopg import Connection
+from psycopg import AsyncConnection
 
 from config import settings
 from src.ingestion.service import LinkCandidate, discover_links
 from src.retrieval.models import PersistedLinkCandidate
 
 
-def enrich_link_candidates(
+async def enrich_link_candidates(
     source_document_id: UUID,
     source_url: str,
-    conn: Connection,
+    conn: AsyncConnection,
     limit: int = settings.ingest_discover_links_default_limit,
 ) -> int:
     """Enrich link_candidates rows with /map metadata for a source document.
@@ -45,15 +50,15 @@ def enrich_link_candidates(
     Args:
         source_document_id: UUID of the document whose links to enrich.
         source_url: The page URL to pass to discover_links().
-        conn: A psycopg Connection (caller manages lifecycle).
+        conn: An AsyncConnection (caller manages lifecycle).
         limit: Max links to request from the /map endpoint.
 
     Returns:
         Number of rows enriched (updated + newly inserted).
     """
     # Check if enrichment already happened for this document.
-    with conn.cursor() as cur:
-        cur.execute(
+    async with conn.cursor() as cur:
+        await cur.execute(
             """
             SELECT EXISTS (
                 SELECT 1 FROM link_candidates
@@ -63,12 +68,12 @@ def enrich_link_candidates(
             """,
             (source_document_id,),
         )
-        row = cur.fetchone()
+        row = await cur.fetchone()
         if row and row[0]:
             return 0
 
-    # Call Firecrawl /map endpoint.
-    candidates: list[LinkCandidate] = discover_links(
+    # Call Firecrawl /map endpoint (async — discover_links is a coroutine).
+    candidates: list[LinkCandidate] = await discover_links(
         source_url, limit=limit
     )
 
@@ -78,10 +83,10 @@ def enrich_link_candidates(
     enriched_count = 0
     now = datetime.now(timezone.utc)
 
-    with conn.cursor() as cur:
+    async with conn.cursor() as cur:
         for candidate in candidates:
             # Try to UPDATE an existing row first (URL discovered during scraping).
-            cur.execute(
+            await cur.execute(
                 """
                 UPDATE link_candidates
                 SET title = %s,
@@ -105,7 +110,7 @@ def enrich_link_candidates(
                 # URL from /map not already in table — insert as fully enriched.
                 # Use ON CONFLICT DO NOTHING in case of a race or if the row
                 # was enriched between the UPDATE and this INSERT.
-                cur.execute(
+                await cur.execute(
                     """
                     INSERT INTO link_candidates (
                         source_document_id, source_url, target_url,
@@ -128,13 +133,13 @@ def enrich_link_candidates(
                 )
                 enriched_count += cur.rowcount
 
-    conn.commit()
+    await conn.commit()
     return enriched_count
 
 
-def get_link_candidates(
+async def get_link_candidates(
     source_document_id: UUID,
-    conn: Connection,
+    conn: AsyncConnection,
     *,
     enriched_only: bool = False,
     exclude_urls: set[str] | None = None,
@@ -143,7 +148,7 @@ def get_link_candidates(
 
     Args:
         source_document_id: UUID of the document to get links for.
-        conn: A psycopg Connection (caller manages lifecycle).
+        conn: An AsyncConnection (caller manages lifecycle).
         enriched_only: If True, only return rows that have been enriched
             (enriched_at IS NOT NULL).
         exclude_urls: Set of target_url values to exclude (e.g. already
@@ -164,8 +169,8 @@ def get_link_candidates(
 
     where = " AND ".join(clauses)
 
-    with conn.cursor() as cur:
-        cur.execute(
+    async with conn.cursor() as cur:
+        await cur.execute(
             f"""
             SELECT
                 id, source_document_id, source_url, target_url,
@@ -176,7 +181,7 @@ def get_link_candidates(
             """,
             params,
         )
-        rows = cur.fetchall()
+        rows = await cur.fetchall()
 
     return [
         PersistedLinkCandidate(

@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import sys
 
 import pytest
+import pytest_asyncio
 from typing import Any
+
+from psycopg import AsyncConnection
+from pgvector.psycopg import register_vector_async
 
 from config import settings
 from src.indexing.schema import init_schema
 
 
+# ---------------------------------------------------------------------------
+# Windows event loop fix: psycopg3 AsyncConnection requires SelectorEventLoop,
+# not ProactorEventLoop (the default on Windows).
+# ---------------------------------------------------------------------------
+if sys.platform == "win32":
+    # Override the default event loop policy globally so that asyncio.run()
+    # and pytest-asyncio both create compatible event loops.
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 def _schema_exists(conn: Any) -> bool:
     with conn.cursor() as cur:
         cur.execute(
@@ -81,3 +95,25 @@ def reset_index_tables(db_conn: Any):
                 cur.execute("TRUNCATE TABLE documents CASCADE;")
 
     return _reset
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def async_db_conn() -> Any:
+    """Provide a session-scoped AsyncConnection for tests that call async
+    retrieval functions (e.g. retrieve()).  register_vector_async is called
+    so pgvector types are correctly handled.
+
+    Uses autocommit=True to match the sync db_conn fixture behaviour —
+    every statement auto-commits, avoiding lock contention with
+    index_batch's separate connection.
+    """
+    database_url = os.getenv("DATABASE_URL") or settings.database_url
+    if not database_url:
+        pytest.skip("Skipping async DB tests: DATABASE_URL is not set.")
+
+    conn = await AsyncConnection.connect(database_url, autocommit=True)
+    await register_vector_async(conn)
+    try:
+        yield conn
+    finally:
+        await conn.close()

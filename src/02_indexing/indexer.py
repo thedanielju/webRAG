@@ -7,6 +7,8 @@ from __future__ import annotations
 #   index_document(doc, depth) — index a single NormalizedDocument
 #   index_batch(docs, depths)  — index multiple documents in one call
 #
+# Both are async coroutines.  Callers must await them.
+#
 # Pipeline phases (index_batch):
 #   Phase 1 — Chunk preparation:
 #       For each document, check the DB for an existing content_hash
@@ -16,19 +18,9 @@ from __future__ import annotations
 #
 #   Phase 2 — Embedding (concurrent):
 #       Collect all child chunk texts across all staged documents and
-#       pass them to embed_texts(), which dispatches concurrent HTTP
-#       batches to the embedding API via ThreadPoolExecutor.  See
-#       embedder.py header for concurrency and failure semantics.
-#
-#       Chunking/embedding overlap:  When the batch contains multiple
-#       documents, Phase 1 and Phase 2 are overlapped using a thread-
-#       pool: chunking of subsequent documents proceeds in the main
-#       thread while embedding of already-chunked documents runs in a
-#       background thread.  This is safe because chunking is pure CPU
-#       work with no shared mutable state, and embed_texts() operates
-#       on an independent list of strings.  For single-document calls
-#       (e.g. index_document), the overlap adds no benefit and is
-#       skipped.
+#       pass them to embed_texts(), which dispatches concurrent async
+#       HTTP batches to the embedding API via asyncio.gather().
+#       See embedder.py header for concurrency and failure semantics.
 #
 #   Phase 3 — Transactional DB writes:
 #       Inside a single Postgres transaction, recheck each document's
@@ -38,6 +30,14 @@ from __future__ import annotations
 #       round-trip instead of one INSERT per row, reducing Phase 3
 #       from ~3s to <0.5s for large batches.
 #
+# Async migration notes:
+#   - DB: psycopg3 AsyncConnection replaces sync Connection.
+#     register_vector_async replaces register_vector.
+#   - Embedding: embed_texts() is now a native coroutine using
+#     asyncio.gather() — the ThreadPoolExecutor overlap pattern
+#     is removed since both embedding and DB I/O are async.
+#   - Chunking remains synchronous (CPU-only, no I/O).
+#
 # Failure handling:
 #   If any phase raises (embedding timeout, 429, DB constraint
 #   violation, etc.), the exception propagates and the entire
@@ -46,15 +46,14 @@ from __future__ import annotations
 #   writes; Phase 2's embed_texts() ensures it for embeddings.
 # ────────────────────────────────────────────────────────────────
 
-from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 import os
 import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from pgvector.psycopg import register_vector
-from psycopg import Connection, connect
+from pgvector.psycopg import register_vector_async
+from psycopg import AsyncConnection
 
 from config import settings
 from src.indexing.chunker import build_chunks
@@ -70,19 +69,22 @@ _SCHEMA_INITIALIZED = False
 _INDEXING_DEBUG = os.getenv("INDEXING_DEBUG", "").strip() == "1"
 
 
-def _connect_db() -> Connection:
+async def _connect_db() -> AsyncConnection:
     if not settings.database_url:
         raise RuntimeError("DATABASE_URL is required for indexing.")
-    conn = connect(settings.database_url)
+    # autocommit=True so that conn.transaction() manages its own
+    # explicit BEGIN/COMMIT, rather than nesting inside an implicit
+    # transaction that would never be committed.
+    conn = await AsyncConnection.connect(settings.database_url, autocommit=True)
     return conn
 
 
-def _ensure_schema_initialized(conn: Connection) -> None:
+async def _ensure_schema_initialized(conn: AsyncConnection) -> None:
     global _SCHEMA_INITIALIZED
     if _SCHEMA_INITIALIZED:
         return
-    with conn.cursor() as cur:
-        cur.execute(
+    async with conn.cursor() as cur:
+        await cur.execute(
             """
             SELECT
                 to_regclass('public.documents') IS NOT NULL,
@@ -90,14 +92,18 @@ def _ensure_schema_initialized(conn: Connection) -> None:
                 to_regclass('public.link_candidates') IS NOT NULL
             """
         )
-        row = cur.fetchone()
+        row = await cur.fetchone()
     schema_exists = bool(row and row[0] and row[1] and row[2])
 
     if schema_exists:
         _SCHEMA_INITIALIZED = True
         return
 
-    init_schema(conn)
+    # init_schema uses sync Connection — create a temporary one.
+    # This only runs once on first use when the schema doesn't exist.
+    from psycopg import connect as sync_connect
+    with sync_connect(settings.database_url) as sync_conn:
+        init_schema(sync_conn)
     _SCHEMA_INITIALIZED = True
 
 
@@ -123,12 +129,12 @@ def _prepare_document_payload(doc: NormalizedDocument, depth: int) -> dict[str, 
     }
 
 
-def _fetch_existing_document(
-    conn: Connection, source_url: str, for_update: bool = False
+async def _fetch_existing_document(
+    conn: AsyncConnection, source_url: str, for_update: bool = False
 ) -> tuple[str, str] | None:
     lock_clause = "FOR UPDATE" if for_update else ""
-    with conn.cursor() as cur:
-        cur.execute(
+    async with conn.cursor() as cur:
+        await cur.execute(
             f"""
             SELECT id::text, content_hash
             FROM documents
@@ -137,20 +143,20 @@ def _fetch_existing_document(
             """,
             (source_url,),
         )
-        row = cur.fetchone()
+        row = await cur.fetchone()
     if row is None:
         return None
     return row[0], row[1]
 
 
-def _delete_document_cascade(conn: Connection, document_id: str) -> None:
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM documents WHERE id = %s", (document_id,))
+async def _delete_document_cascade(conn: AsyncConnection, document_id: str) -> None:
+    async with conn.cursor() as cur:
+        await cur.execute("DELETE FROM documents WHERE id = %s", (document_id,))
 
 
-def _insert_document(conn: Connection, payload: dict[str, object]) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
+async def _insert_document(conn: AsyncConnection, payload: dict[str, object]) -> None:
+    async with conn.cursor() as cur:
+        await cur.execute(
             """
             INSERT INTO documents (
                 id, url, source_url, title, description, language, status_code,
@@ -166,7 +172,7 @@ def _insert_document(conn: Connection, payload: dict[str, object]) -> None:
         )
 
 
-def _insert_chunks(conn: Connection, chunks: list[Chunk]) -> None:
+async def _insert_chunks(conn: AsyncConnection, chunks: list[Chunk]) -> None:
     """Bulk-insert chunk rows using executemany.
 
     executemany sends the parameterised INSERT once and streams all rows
@@ -213,10 +219,10 @@ def _insert_chunks(conn: Connection, chunks: list[Chunk]) -> None:
         for chunk in chunks
     ]
 
-    with conn.cursor() as cur:
+    async with conn.cursor() as cur:
         # executemany: single prepared statement, streamed rows — much
         # faster than N individual execute() calls for large chunk lists.
-        cur.executemany(
+        await cur.executemany(
             """
             INSERT INTO chunks (
                 id, document_id, parent_id, chunk_level, chunk_index, section_heading,
@@ -236,8 +242,8 @@ def _insert_chunks(conn: Connection, chunks: list[Chunk]) -> None:
         )
 
 
-def _insert_link_candidates(
-    conn: Connection,
+async def _insert_link_candidates(
+    conn: AsyncConnection,
     document_id: object,
     source_url: str,
     links: list[str],
@@ -264,8 +270,8 @@ def _insert_link_candidates(
         for target_url in links
     ]
 
-    with conn.cursor() as cur:
-        cur.executemany(
+    async with conn.cursor() as cur:
+        await cur.executemany(
             """
             INSERT INTO link_candidates (
                 source_document_id, source_url, target_url, depth
@@ -306,144 +312,77 @@ def _build_doc_chunks(
     return parent_chunks, child_chunks
 
 
-def index_document(doc: NormalizedDocument, depth: int) -> None:
+async def index_document(doc: NormalizedDocument, depth: int) -> None:
     """Index a single NormalizedDocument at the given crawl depth."""
-    index_batch([doc], [depth])
+    await index_batch([doc], [depth])
 
 
-def index_batch(docs: list[NormalizedDocument], depths: list[int]) -> None:
-    """Chunk, embed, and store a batch of NormalizedDocuments atomically."""
+async def index_batch(docs: list[NormalizedDocument], depths: list[int]) -> None:
+    """Chunk, embed, and store a batch of NormalizedDocuments atomically.
+
+    Async coroutine — callers must await.  Embedding uses asyncio.gather()
+    internally for concurrent API batches.  DB writes use AsyncConnection.
+    """
     if len(docs) != len(depths):
         raise ValueError("docs and depths must have the same length.")
     if not docs:
         return
 
-    with _connect_db() as conn:
+    conn = await _connect_db()
+    try:
         total_started = time.perf_counter()
-        _ensure_schema_initialized(conn)
-        register_vector(conn)
+        await _ensure_schema_initialized(conn)
+        await register_vector_async(conn)
 
         staged_items: list[dict[str, object]] = []
         phase1_started = time.perf_counter()
         if _INDEXING_DEBUG:
             print(f"index_batch debug: phase1 start docs={len(docs)}")
 
-        # ── Phase 1+2 overlap ────────────────────────────────────
-        # For multi-doc batches we overlap chunking (CPU, main thread)
-        # with embedding (I/O, background thread).  As soon as one doc
-        # is chunked, its child texts are submitted for embedding while
-        # we continue chunking the next doc.
-        #
-        # Single-doc batches skip the overlap and call embed_texts()
-        # directly to avoid executor overhead.
-        #
-        # embed_future tracks the background embedding call.  After
-        # chunking finishes we wait for it, merge results, and verify
-        # vector counts.  Any exception in the background thread is
-        # re-raised here via future.result() — no partial results.
-
-        # Accumulates child texts already dispatched for embedding.
-        pending_child_texts: list[str] = []
-        embed_future: Future[list[list[float]]] | None = None
-        # Tracks how many child texts were dispatched so far so we can
-        # map returned vectors back to the correct chunks.
-        dispatched_count: int = 0
-        # All embedding results, concatenated in dispatch order.
-        all_vectors: list[list[float]] = []
-
-        # We use a single-thread executor just for the embed_texts()
-        # overlap.  embed_texts() itself fans out to multiple threads
-        # internally (EMBEDDING_MAX_WORKERS) for its HTTP batches.
-        overlap_executor = ThreadPoolExecutor(max_workers=1) if len(docs) > 1 else None
-
-        def _flush_embeddings() -> None:
-            """Wait for any in-flight embedding future and collect vectors."""
-            nonlocal embed_future, dispatched_count
-            if embed_future is not None:
-                # .result() re-raises any exception from the worker thread.
-                vectors = embed_future.result()
-                all_vectors.extend(vectors)
-                embed_future = None
-
-        def _dispatch_embeddings(texts: list[str]) -> None:
-            """Submit accumulated child texts for embedding in the background."""
-            nonlocal embed_future, dispatched_count
-            if not texts:
-                return
-            # Wait for any prior in-flight batch before dispatching a new one.
-            _flush_embeddings()
-            batch = list(texts)  # snapshot — texts list will be cleared
-            dispatched_count += len(batch)
-            if overlap_executor is not None:
-                embed_future = overlap_executor.submit(embed_texts, batch)
-            else:
-                # Single-doc path: call synchronously, no executor.
-                all_vectors.extend(embed_texts(batch))
-
-        try:
-            for index, (doc, depth) in enumerate(zip(docs, depths), start=1):
-                if _INDEXING_DEBUG:
-                    print(
-                        "index_batch debug: phase1 doc-start",
-                        f"{index}/{len(docs)}",
-                        f"url={doc.source_url or doc.url}",
-                    )
-                payload = _prepare_document_payload(doc, depth)
-                source_url = str(payload["source_url"])
-                existing = _fetch_existing_document(conn, source_url, for_update=False)
-
-                if existing is not None:
-                    _existing_id, existing_hash = existing
-                    if existing_hash == payload["content_hash"]:
-                        if _INDEXING_DEBUG:
-                            print(
-                                "index_batch debug: phase1 doc-skip-noop",
-                                f"{index}/{len(docs)}",
-                                f"url={source_url}",
-                            )
-                        continue
-
-                parent_chunks, child_chunks = _build_doc_chunks(
-                    doc=doc,
-                    depth=depth,
-                    document_id=payload["id"],
+        # ── Phase 1: Chunk preparation ───────────────────────────
+        # Chunking is CPU-only (no I/O) so it runs synchronously.
+        # Dedup checks use async DB queries.
+        for index, (doc, depth) in enumerate(zip(docs, depths), start=1):
+            if _INDEXING_DEBUG:
+                print(
+                    "index_batch debug: phase1 doc-start",
+                    f"{index}/{len(docs)}",
+                    f"url={doc.source_url or doc.url}",
                 )
-                if _INDEXING_DEBUG:
-                    print(
-                        "index_batch debug: phase1 doc-built",
-                        f"{index}/{len(docs)}",
-                        f"parents={len(parent_chunks)} children={len(child_chunks)}",
-                    )
-                staged_items.append(
-                    {
-                        "payload": payload,
-                        "parent_chunks": parent_chunks,
-                        "child_chunks": child_chunks,
-                        "links": list(doc.links) if doc.links else [],
-                    }
+            payload = _prepare_document_payload(doc, depth)
+            source_url = str(payload["source_url"])
+            existing = await _fetch_existing_document(conn, source_url, for_update=False)
+
+            if existing is not None:
+                _existing_id, existing_hash = existing
+                if existing_hash == payload["content_hash"]:
+                    if _INDEXING_DEBUG:
+                        print(
+                            "index_batch debug: phase1 doc-skip-noop",
+                            f"{index}/{len(docs)}",
+                            f"url={source_url}",
+                        )
+                    continue
+
+            parent_chunks, child_chunks = _build_doc_chunks(
+                doc=doc,
+                depth=depth,
+                document_id=payload["id"],
+            )
+            if _INDEXING_DEBUG:
+                print(
+                    "index_batch debug: phase1 doc-built",
+                    f"{index}/{len(docs)}",
+                    f"parents={len(parent_chunks)} children={len(child_chunks)}",
                 )
-
-                # After each doc is chunked, accumulate its child texts.
-                # Dispatch for embedding once we have a meaningful batch.
-                child_texts = [c.chunk_text for c in child_chunks]
-                pending_child_texts.extend(child_texts)
-
-                # Dispatch when we have enough texts to fill a useful batch,
-                # or on the last doc in the loop.
-                batch_threshold = settings.embedding_batch_size
-                if (
-                    len(pending_child_texts) >= batch_threshold
-                    or index == len(docs)
-                ):
-                    _dispatch_embeddings(pending_child_texts)
-                    pending_child_texts = []
-
-            # Wait for final embedding batch to complete.
-            _flush_embeddings()
-
-        finally:
-            if overlap_executor is not None:
-                overlap_executor.shutdown(wait=True)
+            staged_items.append(
+                {
+                    "payload": payload,
+                    "parent_chunks": parent_chunks,
+                    "child_chunks": child_chunks,
+                    "links": list(doc.links) if doc.links else [],
+                }
+            )
 
         if _INDEXING_DEBUG:
             print(
@@ -457,11 +396,16 @@ def index_batch(docs: list[NormalizedDocument], depths: list[int]) -> None:
                 print("index_batch debug: nothing to index (all items were no-op).")
             return
 
-        # Map returned vectors back to child chunks in order.
+        # ── Phase 2: Embedding (concurrent via asyncio.gather) ───
+        # Collect all child texts, send to embed_texts() which fans
+        # out batches concurrently via asyncio.gather internally.
         phase2_started = time.perf_counter()
         all_child_chunks: list[Chunk] = []
+        all_child_texts: list[str] = []
         for item in staged_items:
-            all_child_chunks.extend(item["child_chunks"])
+            children = item["child_chunks"]
+            all_child_chunks.extend(children)
+            all_child_texts.extend(c.chunk_text for c in children)
 
         if _INDEXING_DEBUG:
             parent_count = sum(len(item["parent_chunks"]) for item in staged_items)
@@ -469,6 +413,8 @@ def index_batch(docs: list[NormalizedDocument], depths: list[int]) -> None:
                 "index_batch debug: staged",
                 f"docs={len(staged_items)} parents={parent_count} children={len(all_child_chunks)}",
             )
+
+        all_vectors = await embed_texts(all_child_texts)
 
         if len(all_vectors) != len(all_child_chunks):
             raise ValueError(
@@ -478,31 +424,31 @@ def index_batch(docs: list[NormalizedDocument], depths: list[int]) -> None:
         for chunk, vector in zip(all_child_chunks, all_vectors):
             chunk.embedding = vector
 
-        # Phase 3: transactional writes (with recheck + lock).
+        # ── Phase 3: Transactional DB writes (with recheck + lock) ─
         phase3_started = time.perf_counter()
-        with conn.transaction():
+        async with conn.transaction():
             for item in staged_items:
                 payload = item["payload"]
                 parent_chunks = item["parent_chunks"]
                 child_chunks = item["child_chunks"]
                 source_url = str(payload["source_url"])
 
-                existing = _fetch_existing_document(conn, source_url, for_update=True)
+                existing = await _fetch_existing_document(conn, source_url, for_update=True)
                 if existing is not None:
                     existing_id, existing_hash = existing
                     if existing_hash == payload["content_hash"]:
                         continue
-                    _delete_document_cascade(conn, existing_id)
+                    await _delete_document_cascade(conn, existing_id)
 
-                _insert_document(conn, payload)
-                _insert_chunks(conn, parent_chunks)
-                _insert_chunks(conn, child_chunks)
+                await _insert_document(conn, payload)
+                await _insert_chunks(conn, parent_chunks)
+                await _insert_chunks(conn, child_chunks)
 
                 # Persist outgoing links from this document for
                 # orchestration link scoring.  URL-only rows;
                 # enrichment happens on-demand via enrich_link_candidates().
                 doc_links: list[str] = item.get("links", [])
-                _insert_link_candidates(
+                await _insert_link_candidates(
                     conn,
                     document_id=payload["id"],
                     source_url=str(payload["source_url"]),
@@ -519,3 +465,5 @@ def index_batch(docs: list[NormalizedDocument], depths: list[int]) -> None:
                 "index_batch debug timings:",
                 f"phase1+2_chunk_embed={phase1:.2f}s phase2_assign={phase2:.2f}s phase3_db={phase3:.2f}s total={total:.2f}s",
             )
+    finally:
+        await conn.close()

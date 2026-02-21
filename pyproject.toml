@@ -10,6 +10,7 @@ dependencies = [
     "firecrawl-py==4.16.0",
     "python-dotenv",
     "pytest",
+    "pytest-asyncio",
     "psycopg[binary]",
     "pgvector",
     "openai",

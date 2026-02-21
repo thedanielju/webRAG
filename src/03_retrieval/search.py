@@ -5,12 +5,18 @@ from __future__ import annotations
 High-level flow:
 1. Determine corpus mode (full_context vs chunk) from parent token span.
 2. Return early without embedding when corpus is empty (cost guard).
-3. Embed query once.
+3. Embed query once (async — embed_query is a coroutine).
 4. Execute either:
    - full_context parent load (ordered, budgeted), or
    - chunk-mode child ANN search + parent aggregation + budgeting.
 5. Apply deterministic surface selection (html vs markdown) per returned parent.
 6. Return a structured RetrievalResult for orchestration.
+
+Async migration:
+  All functions that touch the database or call embed_query() are now
+  async coroutines.  The conn parameter is an AsyncConnection (psycopg3).
+  Internal cursor operations use ``async with conn.cursor()`` and
+  ``await cur.execute()``.  SQL queries are unchanged.
 """
 
 from collections import defaultdict
@@ -18,7 +24,7 @@ from time import perf_counter
 from typing import Any
 import warnings
 
-from psycopg import Connection
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from config import settings
@@ -75,17 +81,17 @@ def _depth_multiplier(depth: int) -> float:
     )
 
 
-def _determine_mode(
-    conn: Connection,
+async def _determine_mode(
+    conn: AsyncConnection,
     source_urls: list[str] | None = None,
     context_budget_override: int | None = None,
 ) -> tuple[str, int]:
     """Determine retrieval mode from parent-token corpus size."""
     effective_threshold = _get_effective_threshold(context_budget_override)
 
-    with conn.cursor() as cur:
+    async with conn.cursor() as cur:
         if source_urls:
-            cur.execute(
+            await cur.execute(
                 """
                 SELECT COALESCE(SUM(token_end - token_start), 0) AS total_tokens
                 FROM chunks
@@ -95,24 +101,24 @@ def _determine_mode(
                 (source_urls,),
             )
         else:
-            cur.execute(
+            await cur.execute(
                 """
                 SELECT COALESCE(SUM(token_end - token_start), 0) AS total_tokens
                 FROM chunks
                 WHERE chunk_level = 'parent'
                 """
             )
-        row = cur.fetchone()
+        row = await cur.fetchone()
     total_tokens = int(row[0] if row else 0)
     if total_tokens <= effective_threshold:
         return "full_context", total_tokens
     return "chunk", total_tokens
 
 
-def _load_corpus_counts(conn: Connection, source_urls: list[str] | None) -> tuple[int, int]:
-    with conn.cursor() as cur:
+async def _load_corpus_counts(conn: AsyncConnection, source_urls: list[str] | None) -> tuple[int, int]:
+    async with conn.cursor() as cur:
         if source_urls:
-            cur.execute(
+            await cur.execute(
                 """
                 SELECT COUNT(*) AS total_documents
                 FROM documents
@@ -120,8 +126,8 @@ def _load_corpus_counts(conn: Connection, source_urls: list[str] | None) -> tupl
                 """,
                 (source_urls,),
             )
-            total_documents = int(cur.fetchone()[0])
-            cur.execute(
+            total_documents = int((await cur.fetchone())[0])
+            await cur.execute(
                 """
                 SELECT COUNT(*) AS total_parent_chunks
                 FROM chunks
@@ -131,16 +137,16 @@ def _load_corpus_counts(conn: Connection, source_urls: list[str] | None) -> tupl
                 (source_urls,),
             )
         else:
-            cur.execute("SELECT COUNT(*) AS total_documents FROM documents")
-            total_documents = int(cur.fetchone()[0])
-            cur.execute(
+            await cur.execute("SELECT COUNT(*) AS total_documents FROM documents")
+            total_documents = int((await cur.fetchone())[0])
+            await cur.execute(
                 """
                 SELECT COUNT(*) AS total_parent_chunks
                 FROM chunks
                 WHERE chunk_level = 'parent'
                 """
             )
-        total_parent_chunks = int(cur.fetchone()[0])
+        total_parent_chunks = int((await cur.fetchone())[0])
     return total_documents, total_parent_chunks
 
 
@@ -210,13 +216,13 @@ def _group_chunks_by_source_ordered(chunks: list[RetrievedChunk]) -> list[Retrie
     return ordered
 
 
-def _query_full_context_parents(
-    conn: Connection,
+async def _query_full_context_parents(
+    conn: AsyncConnection,
     source_urls: list[str] | None,
 ) -> list[dict[str, Any]]:
-    with conn.cursor(row_factory=dict_row) as cur:
+    async with conn.cursor(row_factory=dict_row) as cur:
         if source_urls:
-            cur.execute(
+            await cur.execute(
                 """
                 SELECT
                     id, document_id, parent_id, chunk_level,
@@ -234,7 +240,7 @@ def _query_full_context_parents(
                 (source_urls,),
             )
         else:
-            cur.execute(
+            await cur.execute(
                 """
                 SELECT
                     id, document_id, parent_id, chunk_level,
@@ -249,11 +255,11 @@ def _query_full_context_parents(
                 ORDER BY depth ASC, source_url, chunk_index ASC
                 """
             )
-        return list(cur.fetchall())
+        return list(await cur.fetchall())
 
 
-def _run_hnsw_child_search(
-    conn: Connection,
+async def _run_hnsw_child_search(
+    conn: AsyncConnection,
     query_embedding: list[float],
     source_urls: list[str] | None,
 ) -> list[dict[str, Any]]:
@@ -263,19 +269,20 @@ def _run_hnsw_child_search(
     - Uses the partial HNSW index on child embeddings.
     - Applies similarity floor as a cosine distance threshold.
     - Sets transaction-local hnsw.ef_search via set_config().
+    - Async: uses AsyncConnection with await on cursor operations.
     """
     distance_threshold = _distance_threshold_from_similarity_floor()
-    with conn.cursor(row_factory=dict_row) as cur:
+    async with conn.cursor(row_factory=dict_row) as cur:
         # pgvector recall/speed control; set transaction-locally.
         # SET LOCAL doesn't accept bind placeholders in psycopg, so use
         # set_config(name, value, is_local=true) to stay parameterized.
-        cur.execute(
+        await cur.execute(
             "SELECT set_config('hnsw.ef_search', %s, true)",
             (str(settings.retrieval_hnsw_ef_search),),
         )
 
         if source_urls:
-            cur.execute(
+            await cur.execute(
                 """
                 SELECT
                     id, parent_id, document_id,
@@ -303,7 +310,7 @@ def _run_hnsw_child_search(
                 ),
             )
         else:
-            cur.execute(
+            await cur.execute(
                 """
                 SELECT
                     id, parent_id, document_id,
@@ -328,14 +335,14 @@ def _run_hnsw_child_search(
                     settings.retrieval_top_k_children_limit,
                 ),
             )
-        return list(cur.fetchall())
+        return list(await cur.fetchall())
 
 
-def _fetch_parents_by_ids(conn: Connection, parent_ids: list[Any]) -> dict[Any, dict[str, Any]]:
+async def _fetch_parents_by_ids(conn: AsyncConnection, parent_ids: list[Any]) -> dict[Any, dict[str, Any]]:
     if not parent_ids:
         return {}
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
             """
             SELECT
                 id, document_id, parent_id, chunk_level,
@@ -350,12 +357,12 @@ def _fetch_parents_by_ids(conn: Connection, parent_ids: list[Any]) -> dict[Any, 
             """,
             (parent_ids,),
         )
-        rows = list(cur.fetchall())
+        rows = list(await cur.fetchall())
     return {row["id"]: row for row in rows}
 
 
-def _build_chunk_mode_results(
-    conn: Connection,
+async def _build_chunk_mode_results(
+    conn: AsyncConnection,
     query_embedding: list[float],
     source_urls: list[str] | None,
     context_budget: int,
@@ -365,9 +372,11 @@ def _build_chunk_mode_results(
     Children are scored first, then aggregated to parents with max-score
     semantics. Parent results are budgeted by token span and always return at
     least one hit when ANN produced any candidate.
+
+    Async: uses async transaction context and awaits DB helper coroutines.
     """
-    with conn.transaction():
-        child_rows = _run_hnsw_child_search(conn, query_embedding, source_urls)
+    async with conn.transaction():
+        child_rows = await _run_hnsw_child_search(conn, query_embedding, source_urls)
 
     if not child_rows:
         return []
@@ -389,7 +398,7 @@ def _build_chunk_mode_results(
         key=lambda parent_id: parent_best[parent_id][0],
         reverse=True,
     )
-    parent_rows = _fetch_parents_by_ids(conn, ranked_parent_ids)
+    parent_rows = await _fetch_parents_by_ids(conn, ranked_parent_ids)
 
     # Context budget over parent token spans.
     selected: list[RetrievedChunk] = []
@@ -416,13 +425,16 @@ def _build_chunk_mode_results(
     return _group_chunks_by_source_ordered(selected)
 
 
-def _build_full_context_results(
-    conn: Connection,
+async def _build_full_context_results(
+    conn: AsyncConnection,
     source_urls: list[str] | None,
     context_budget: int,
 ) -> list[RetrievedChunk]:
-    """Load ordered parent chunks directly for small-corpus mode."""
-    rows = _query_full_context_parents(conn, source_urls)
+    """Load ordered parent chunks directly for small-corpus mode.
+
+    Async: awaits the parent query coroutine.
+    """
+    rows = await _query_full_context_parents(conn, source_urls)
     if not rows:
         return []
 
@@ -438,8 +450,8 @@ def _build_full_context_results(
     return _group_chunks_by_source_ordered(selected)
 
 
-def retrieve(
-    conn: Connection,
+async def retrieve(
+    conn: AsyncConnection,
     query: str,
     *,
     source_urls: list[str] | None = None,
@@ -448,27 +460,29 @@ def retrieve(
     """Retrieve supporting evidence chunks from the indexed corpus.
 
     Preconditions:
-    - conn is an active psycopg3 connection to the WebRAG database
-    - register_vector(conn) has already been called by the caller
+    - conn is an active psycopg3 AsyncConnection to the WebRAG database
+    - register_vector_async(conn) has already been called by the caller
     - schema has already been initialized by indexing
 
     Behavior:
     - Empty corpus short-circuits before embedding to avoid unnecessary cost.
     - Full-context mode returns ordered parent chunks with score=1.0.
     - Chunk mode performs child ANN search and returns ranked parent chunks.
+
+    Async: all DB and embedding calls are awaited.
     """
     started = perf_counter()
     normalized_source_urls = _normalize_source_urls(source_urls)
     context_budget = _get_effective_context_budget(context_budget_override)
 
     search_started = perf_counter()
-    mode, total_tokens = _determine_mode(
+    mode, total_tokens = await _determine_mode(
         conn,
         source_urls=normalized_source_urls,
         context_budget_override=context_budget_override,
     )
 
-    total_documents, total_parent_chunks = _load_corpus_counts(conn, normalized_source_urls)
+    total_documents, total_parent_chunks = await _load_corpus_counts(conn, normalized_source_urls)
 
     if total_tokens == 0:
         search_ms = (perf_counter() - search_started) * 1000.0
@@ -491,13 +505,13 @@ def retrieve(
         )
 
     embed_started = perf_counter()
-    query_vector = embed_query(query)
+    query_vector = await embed_query(query)
     embed_ms = (perf_counter() - embed_started) * 1000.0
 
     if mode == "full_context":
-        chunks = _build_full_context_results(conn, normalized_source_urls, context_budget)
+        chunks = await _build_full_context_results(conn, normalized_source_urls, context_budget)
     else:
-        chunks = _build_chunk_mode_results(
+        chunks = await _build_chunk_mode_results(
             conn,
             query_embedding=query_vector,
             source_urls=normalized_source_urls,
