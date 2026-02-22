@@ -200,6 +200,7 @@ def _row_to_retrieved_chunk(
         title=row["title"],
         selected_text=selected_text,
         surface=surface,
+        chunk_text=str(row["chunk_text"]),
         section_heading=row["section_heading"],
         chunk_index=int(row["chunk_index"]),
         char_start=int(row["char_start"]),

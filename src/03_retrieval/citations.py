@@ -35,10 +35,13 @@ def extract_citation(
     relative_end = quote_end - chunk.char_start
     if relative_start < 0:
         return None
-    if relative_end > len(chunk.selected_text):
+    # Use chunk_text (markdown) for offset-based extraction — char offsets
+    # reference the original markdown, not the HTML surface text.
+    citation_source = chunk.chunk_text
+    if relative_end > len(citation_source):
         return None
 
-    verbatim = chunk.selected_text[relative_start:relative_end]
+    verbatim = citation_source[relative_start:relative_end]
     if not verbatim:
         return None
 

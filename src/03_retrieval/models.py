@@ -29,6 +29,8 @@ class RetrievedChunk(BaseModel):
     # Content selected by retrieval surface rules.
     selected_text: str
     surface: Literal["html", "markdown"]
+    # Original markdown text — always set, used for char-offset citations.
+    chunk_text: str
     section_heading: str | None
     chunk_index: int
 

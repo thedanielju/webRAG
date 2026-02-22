@@ -224,9 +224,17 @@ def _build_evidence(
     tokens_used = _count_tokens("[EVIDENCE]\n")
     included = 0
     all_images: list[_ImageEntry] = []
+    seen_texts: set[str] = set()  # dedup identical selected_text across parents
 
     for rc in ordered:
         c = rc.chunk
+
+        # Skip duplicate content (e.g. multiple parents sharing the same
+        # html_text because they matched the same HTML context element).
+        if c.selected_text in seen_texts:
+            continue
+        seen_texts.add(c.selected_text)
+
         source_num = source_map.get(c.source_url, 0)
 
         # Build header line.
@@ -441,18 +449,25 @@ def _build_citations(
     citations: list[CitationSpan],
     source_map: SourceMap,
 ) -> str:
-    """Build [CITATIONS] section with verbatim quotes."""
+    """Build [CITATIONS] section with verbatim quotes (deduplicated)."""
     lines = ["[CITATIONS]"]
-    for i, cit in enumerate(citations, 1):
-        source_num = source_map.get(cit.source_url, 0)
+    seen_verbatim: set[str] = set()
+    citation_num = 0
+    for cit in citations:
         # Truncate very long verbatim text.
         verbatim = cit.verbatim_text
         if len(verbatim) > 300:
             verbatim = verbatim[:297] + "..."
+        # Skip duplicate verbatim quotes.
+        if verbatim in seen_verbatim:
+            continue
+        seen_verbatim.add(verbatim)
+        citation_num += 1
+        source_num = source_map.get(cit.source_url, 0)
         heading_note = f" § {cit.section_heading}" if cit.section_heading else ""
         title = cit.title or "Untitled"
         lines.append(
-            f'[{i}] "{verbatim}"\n'
+            f'[{citation_num}] "{verbatim}"\n'
             f"    — {title}, {cit.source_url}{heading_note}"
         )
     return "\n\n".join(lines)

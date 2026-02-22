@@ -156,6 +156,7 @@ async def expand_locality(
             title=row[21],
             selected_text=selected_text,
             surface=surface,
+            chunk_text=chunk_text,
             section_heading=row[5],
             chunk_index=row[4],
             char_start=row[14],

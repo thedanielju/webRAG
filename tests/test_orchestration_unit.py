@@ -102,6 +102,7 @@ def _make_retrieved_chunk(
         title=title,
         selected_text=selected_text,
         surface="markdown",
+        chunk_text=selected_text,
         section_heading="Test Section",
         chunk_index=chunk_index,
         char_start=char_start,

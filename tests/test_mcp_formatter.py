@@ -55,6 +55,7 @@ def _make_chunk(
             title=title,
             selected_text=text,
             surface=surface,
+            chunk_text=text,
             section_heading=section,
             chunk_index=chunk_index,
             char_start=0,

@@ -13,12 +13,21 @@ from typing import Any
 from firecrawl import AsyncFirecrawlApp
 from config import settings
 
-if not settings.firecrawl_api_key:
-    raise RuntimeError("Missing FIRECRAWL_API_KEY - please set it in your environment or .env")
+_app: AsyncFirecrawlApp | None = None
 
-# AsyncFirecrawlApp mirrors FirecrawlApp — same constructor, same methods,
-# but each method is a coroutine that must be awaited.
-app = AsyncFirecrawlApp(api_key=settings.firecrawl_api_key)
+
+def _get_app() -> AsyncFirecrawlApp:
+    """Build the Firecrawl client lazily so imports don't require API keys."""
+    global _app
+    if _app is None:
+        if not settings.firecrawl_api_key:
+            raise RuntimeError(
+                "Missing FIRECRAWL_API_KEY - please set it in your environment or .env"
+            )
+        # AsyncFirecrawlApp mirrors FirecrawlApp — same constructor, same methods,
+        # but each method is a coroutine that must be awaited.
+        _app = AsyncFirecrawlApp(api_key=settings.firecrawl_api_key)
+    return _app
 
 # Keep a local alias so callers can inspect runtime defaults from this module.
 DEFAULT_SCRAPE_OPTIONS: dict[str, Any] = settings.firecrawl_default_scrape_options
@@ -29,7 +38,7 @@ DEFAULT_SCRAPE_OPTIONS: dict[str, Any] = settings.firecrawl_default_scrape_optio
 
 async def scrape(url: str, options: dict[str, Any] | None = None) -> dict[str, Any]: # no options defaults to None
     merged_options = {**DEFAULT_SCRAPE_OPTIONS, **(options or {})}
-    return await app.scrape(url, **merged_options)
+    return await _get_app().scrape(url, **merged_options)
 
 # add ingest_batch at orchestration step
 
@@ -59,7 +68,7 @@ def _extract_batch_documents(response: Any) -> list[Any]:
 
 async def batch_scrape(urls: list[str], options: dict[str, Any] | None = None) -> list[Any]:
     merged_options = {**DEFAULT_SCRAPE_OPTIONS, **(options or {})}
-    response = await app.batch_scrape(urls, **merged_options)
+    response = await _get_app().batch_scrape(urls, **merged_options)
     documents = _extract_batch_documents(response)
 
     if len(documents) == len(urls):
@@ -94,7 +103,7 @@ async def batch_scrape(urls: list[str], options: dict[str, Any] | None = None) -
     return ordered_documents
 
 async def map(url: str, limit: int = settings.firecrawl_map_default_limit) -> list[Any]:
-    response = await app.map(url, limit=limit)  # cap candidate link volume for orchestration
+    response = await _get_app().map(url, limit=limit)  # cap candidate link volume for orchestration
 
     if isinstance(response, list):
         return response

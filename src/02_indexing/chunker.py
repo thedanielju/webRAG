@@ -486,18 +486,16 @@ def _extract_html_snippet(
         if context_tag.name == "dl":
             sub_candidates.append(context_tag)
     if flags.has_math:
-        # Extract clean MathML <math> tags only — these contain semantic
-        # markup (<mi>, <mo>, <mn>, <mrow>, etc.) that renderers understand.
-        # MathJax visual elements (<mjx-*>) are rendering artifacts and are
-        # intentionally excluded from the snippet.
-        math_tags = list(context_tag.find_all("math"))
+        # Add <math> tags to sub_candidates so they participate in
+        # overlap scoring like tables/code.  This keeps the surrounding
+        # prose context instead of returning bare MathML tags.
+        # We also add the context_tag itself as a candidate so the
+        # scorer can pick the element that best matches the chunk text
+        # (often a <p> or <div> containing inline math + explanation).
+        sub_candidates.extend(context_tag.find_all("math"))
         if context_tag.name == "math":
-            math_tags.append(context_tag)
-        if math_tags:
-            # Return all MathML tags directly, skip overlap scoring.
-            return " ".join(str(t) for t in math_tags)
-        # Fallback: no <math> tags found — use the context tag itself.
-        return str(context_tag)
+            sub_candidates.append(context_tag)
+        sub_candidates.append(context_tag)
     if flags.has_admonition:
         class_pattern = re.compile(
             r"(admonition|note|warning|tip|important|caution|danger|info)",
