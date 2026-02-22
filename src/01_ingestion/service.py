@@ -153,15 +153,15 @@ def _normalize_document(result: Any, input_url: str, doc_type: str) -> Normalize
     )
 
 
-def ingest(url: str) -> NormalizedDocument:
+async def ingest(url: str) -> NormalizedDocument:
     # Scrape first so doc_type can use metadata-based detection.
-    result = firecrawl_client.scrape(url)
+    result = await firecrawl_client.scrape(url)
     doc_type = _detect_doc_type(url, result)
     return _normalize_document(result, input_url=url, doc_type=doc_type)
 
 
-def ingest_batch(urls: list[str]) -> list[NormalizedDocument | None]:
-    results = firecrawl_client.batch_scrape(urls)
+async def ingest_batch(urls: list[str]) -> list[NormalizedDocument | None]:
+    results = await firecrawl_client.batch_scrape(urls)
 
     normalized_documents: list[NormalizedDocument | None] = []
     for url, result in zip(urls, results):
@@ -178,10 +178,10 @@ def ingest_batch(urls: list[str]) -> list[NormalizedDocument | None]:
 
 
 # Takes a URL, optional limit for how many links to fetch, optional set of URLs to exclude. Returns a list of LinkCandidate objects.
-def discover_links(
+async def discover_links(
     url: str, limit: int = settings.ingest_discover_links_default_limit, exclude: set[str] | None = None
 ) -> list[LinkCandidate]:
-    links = firecrawl_client.map(url, limit=limit)
+    links = await firecrawl_client.map(url, limit=limit)
 
 # Calls map, initializes empty results list, converts exclude to an empty set if None was passed, so in excluded check always works without needing a None check later.
     candidates: list[LinkCandidate] = []

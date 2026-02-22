@@ -10,7 +10,9 @@ dependencies = [
     "firecrawl-py==4.16.0",
     "python-dotenv",
     "pytest",
+    "pytest-asyncio",
     "psycopg[binary]",
+    "psycopg-pool",
     "pgvector",
     "openai",
     "tiktoken",
@@ -19,7 +21,25 @@ dependencies = [
     "lxml",
     "pydantic",
     "pydantic-settings",
+    "zeroentropy",
+    "cohere",
+    "httpx",
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
+[tool.setuptools]
+packages = [
+    "src",
+    "src.ingestion",
+    "src.indexing",
+    "src.retrieval",
+    "src.orchestration",
+    "src.mcp_server",
+]
+
+[tool.setuptools.package-dir]
+"src" = "src"
+"src.ingestion" = "src/01_ingestion"
+"src.indexing" = "src/02_indexing"
+"src.retrieval" = "src/03_retrieval"
+"src.orchestration" = "src/04_orchestration"
+"src.mcp_server" = "src/05_mcp_server"

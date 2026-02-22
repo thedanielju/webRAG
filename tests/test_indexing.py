@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 import hashlib
 import os
@@ -39,7 +40,8 @@ def indexed_corpus(db_conn, reset_index_tables) -> dict[str, Any]:
         for url in urls:
             started = time.perf_counter()
             print(f"indexing fixture: ingesting {url}")
-            doc = ingest(url)
+            # ingest() is now async — run in a fresh event loop.
+            doc = asyncio.run(ingest(url))
             elapsed = time.perf_counter() - started
             print(f"indexing fixture: ingested {url} in {elapsed:.1f}s")
             docs.append(doc)
@@ -51,7 +53,8 @@ def indexed_corpus(db_conn, reset_index_tables) -> dict[str, Any]:
     depths = [0, 0, 2]
     started_index = time.perf_counter()
     print("indexing fixture: running index_batch")
-    index_batch(docs, depths)
+    # index_batch() is now async — run in a fresh event loop.
+    asyncio.run(index_batch(docs, depths))
     print(f"indexing fixture: index_batch finished in {time.perf_counter() - started_index:.1f}s")
 
     source_urls = [_source_url(doc) for doc in docs]
@@ -243,6 +246,49 @@ class TestIndexingIntegration:
         assert (code_count or 0) > 0
         assert (table_count or 0) > 0
 
+    def test_parent_rich_content_propagated_on_scikit(self, db_conn, indexed_corpus):
+        scikit_source = indexed_corpus["source_urls"][0]
+        with db_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM chunks
+                WHERE source_url = %s
+                  AND chunk_level = 'parent'
+                  AND (
+                    has_table
+                    OR has_code
+                    OR has_math
+                    OR has_definition_list
+                    OR has_admonition
+                  )
+                """,
+                (scikit_source,),
+            )
+            flagged_parent_count = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM chunks
+                WHERE source_url = %s
+                  AND chunk_level = 'parent'
+                  AND (
+                    has_table
+                    OR has_code
+                    OR has_math
+                    OR has_definition_list
+                    OR has_admonition
+                  )
+                  AND html_text IS NULL
+                """,
+                (scikit_source,),
+            )
+            flagged_missing_html = cur.fetchone()[0]
+
+        assert flagged_parent_count > 0
+        assert flagged_missing_html == 0
+
     def test_depth_persisted_correctly(self, db_conn, indexed_corpus):
         scikit_source, factual_source, unrelated_source = indexed_corpus["source_urls"]
         with db_conn.cursor() as cur:
@@ -292,7 +338,8 @@ class TestIndexingIntegration:
             cur.execute("SELECT COUNT(*) FROM chunks WHERE source_url = %s", (source_url,))
             before = cur.fetchone()[0]
 
-        index_batch([scikit_doc], [0])
+        # index_batch() is now async.
+        asyncio.run(index_batch([scikit_doc], [0]))
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM chunks WHERE source_url = %s", (source_url,))
@@ -324,7 +371,8 @@ class TestIndexingIntegration:
             content_hash=mutated_hash,
         )
 
-        index_batch([mutated_doc], [0])
+        # index_batch() is now async.
+        asyncio.run(index_batch([mutated_doc], [0]))
 
         with db_conn.cursor() as cur:
             cur.execute(
@@ -345,7 +393,8 @@ class TestIndexingIntegration:
         assert new_chunk_count <= max(2 * old_chunk_count, 1)
 
         # restore original document state for downstream tests if needed
-        index_batch([original], [0])
+        # index_batch() is now async.
+        asyncio.run(index_batch([original], [0]))
 
     def test_char_offsets_valid(self, db_conn, indexed_corpus):
         markdown_lengths = {
@@ -428,7 +477,8 @@ class TestIndexingIntegration:
             cur.execute("SELECT COUNT(*) FROM chunks")
             chunks_before = cur.fetchone()[0]
 
-        index_batch([], [])
+        # index_batch() is now async.
+        asyncio.run(index_batch([], []))
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM documents")

@@ -28,10 +28,11 @@ def _import_or_skip():
         raise
 
 
-def test_ingest_html():
+@pytest.mark.asyncio
+async def test_ingest_html():
     LinkCandidate, NormalizedDocument, discover_links, ingest, ingest_batch = _import_or_skip()
 
-    result = ingest(HTML_URL)
+    result = await ingest(HTML_URL)
 
     assert isinstance(result, NormalizedDocument)
     assert result.doc_type == "html"
@@ -49,10 +50,11 @@ def test_ingest_html():
     print("ingest(html) links count:", len(result.links))
 
 
-def test_ingest_pdf():
+@pytest.mark.asyncio
+async def test_ingest_pdf():
     LinkCandidate, NormalizedDocument, discover_links, ingest, ingest_batch = _import_or_skip()
 
-    result = ingest(PDF_URL)
+    result = await ingest(PDF_URL)
 
     assert isinstance(result, NormalizedDocument)
     assert result.doc_type == "pdf"
@@ -64,10 +66,11 @@ def test_ingest_pdf():
     print("ingest(pdf) links count:", len(result.links))
 
 
-def test_ingest_batch():
+@pytest.mark.asyncio
+async def test_ingest_batch():
     LinkCandidate, NormalizedDocument, discover_links, ingest, ingest_batch = _import_or_skip()
 
-    results = ingest_batch([HTML_URL, INVALID_URL])
+    results = await ingest_batch([HTML_URL, INVALID_URL])
 
     assert isinstance(results, list)
     assert len(results) == 2
@@ -81,10 +84,11 @@ def test_ingest_batch():
     print("ingest_batch valid markdown preview:\n", (valid_result.markdown or "")[:300])
 
 
-def test_discover_links():
+@pytest.mark.asyncio
+async def test_discover_links():
     LinkCandidate, NormalizedDocument, discover_links, ingest, ingest_batch = _import_or_skip()
 
-    candidates = discover_links(MAP_URL, limit=10)
+    candidates = await discover_links(MAP_URL, limit=10)
 
     assert isinstance(candidates, list)
     assert len(candidates) > 0
@@ -102,13 +106,14 @@ def test_discover_links():
         )
 
 
-def test_discover_links_exclude():
+@pytest.mark.asyncio
+async def test_discover_links_exclude():
     LinkCandidate, NormalizedDocument, discover_links, ingest, ingest_batch = _import_or_skip()
 
-    initial_candidates = discover_links(MAP_URL, limit=20)
+    initial_candidates = await discover_links(MAP_URL, limit=20)
     exclude_set = {candidate.url for candidate in initial_candidates[:5]}
 
-    filtered_candidates = discover_links(MAP_URL, limit=20, exclude=exclude_set)
+    filtered_candidates = await discover_links(MAP_URL, limit=20, exclude=exclude_set)
     filtered_urls = {candidate.url for candidate in filtered_candidates}
 
     assert all(excluded_url not in filtered_urls for excluded_url in exclude_set)

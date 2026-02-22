@@ -1,18 +1,24 @@
 # exception contract not specified yet as im the only caller; above layers might necessitate this
 # client handles only API access and exposes scrape and map
+#
+# Async migration: replaced FirecrawlApp with AsyncFirecrawlApp.
+# All methods are now coroutines (async def / await).  The API surface
+# is identical — same method names, same parameters, same return types.
 
 from __future__ import annotations
 
 from urllib.parse import urldefrag, urlparse
 from typing import Any
 
-from firecrawl import FirecrawlApp
+from firecrawl import AsyncFirecrawlApp
 from config import settings
 
 if not settings.firecrawl_api_key:
     raise RuntimeError("Missing FIRECRAWL_API_KEY - please set it in your environment or .env")
 
-app = FirecrawlApp(api_key=settings.firecrawl_api_key)
+# AsyncFirecrawlApp mirrors FirecrawlApp — same constructor, same methods,
+# but each method is a coroutine that must be awaited.
+app = AsyncFirecrawlApp(api_key=settings.firecrawl_api_key)
 
 # Keep a local alias so callers can inspect runtime defaults from this module.
 DEFAULT_SCRAPE_OPTIONS: dict[str, Any] = settings.firecrawl_default_scrape_options
@@ -21,9 +27,9 @@ DEFAULT_SCRAPE_OPTIONS: dict[str, Any] = settings.firecrawl_default_scrape_optio
 # options parameters exists so callers can later override specific defaults
 # very unlikely service will override anything
 
-def scrape(url: str, options: dict[str, Any] | None = None) -> dict[str, Any]: # no options defaults to None
+async def scrape(url: str, options: dict[str, Any] | None = None) -> dict[str, Any]: # no options defaults to None
     merged_options = {**DEFAULT_SCRAPE_OPTIONS, **(options or {})}
-    return app.scrape(url, **merged_options)
+    return await app.scrape(url, **merged_options)
 
 # add ingest_batch at orchestration step
 
@@ -51,9 +57,9 @@ def _extract_batch_documents(response: Any) -> list[Any]:
     raise ValueError("Unexpected response shape from Firecrawl batch_scrape endpoint.")
 
 
-def batch_scrape(urls: list[str], options: dict[str, Any] | None = None) -> list[Any]:
+async def batch_scrape(urls: list[str], options: dict[str, Any] | None = None) -> list[Any]:
     merged_options = {**DEFAULT_SCRAPE_OPTIONS, **(options or {})}
-    response = app.batch_scrape(urls, **merged_options)
+    response = await app.batch_scrape(urls, **merged_options)
     documents = _extract_batch_documents(response)
 
     if len(documents) == len(urls):
@@ -87,8 +93,8 @@ def batch_scrape(urls: list[str], options: dict[str, Any] | None = None) -> list
 
     return ordered_documents
 
-def map(url: str, limit: int = settings.firecrawl_map_default_limit) -> list[Any]:
-    response = app.map(url, limit=limit)  # cap candidate link volume for orchestration
+async def map(url: str, limit: int = settings.firecrawl_map_default_limit) -> list[Any]:
+    response = await app.map(url, limit=limit)  # cap candidate link volume for orchestration
 
     if isinstance(response, list):
         return response

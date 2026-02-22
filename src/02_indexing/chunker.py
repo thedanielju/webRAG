@@ -2,6 +2,16 @@
 
 from __future__ import annotations
 
+"""Chunk construction for indexing.
+
+Core responsibilities:
+- Split markdown into parent and child chunks.
+- Detect rich-content signals from markdown + HTML context.
+- Attach child-level html_text snippets when rich content exists.
+- Propagate rich-content metadata to parents so retrieval can choose the
+  correct render surface (html vs markdown) at parent return time.
+"""
+
 import re
 from datetime import datetime
 from typing import Callable
@@ -58,8 +68,6 @@ def _soup_from_html(text: str) -> BeautifulSoup:
 # via _best_matching_html_tag, then checks that element for tables, code, definition lists, admonitions.
 
 def _detect_markdown_flags(text: str) -> RichContentFlags:
-    lower = text.lower()
-
     has_table = bool(re.search(r"(?m)^\|.+\|\s*$", text))
     has_code = "```" in text
 
@@ -218,6 +226,18 @@ def _merge_flags(a: RichContentFlags, b: RichContentFlags) -> RichContentFlags:
     )
 
 
+def _aggregate_flags_from_children(children: list[Chunk]) -> RichContentFlags:
+    """Aggregate rich-content flags from child chunks to parent-level truth."""
+    return RichContentFlags(
+        has_table=any(child.flags.has_table for child in children),
+        has_code=any(child.flags.has_code for child in children),
+        has_math=any(child.flags.has_math for child in children),
+        has_definition_list=any(child.flags.has_definition_list for child in children),
+        has_admonition=any(child.flags.has_admonition for child in children),
+        has_steps=any(child.flags.has_steps for child in children),
+    )
+
+
 def _should_store_html(flags: RichContentFlags) -> bool:
     return (
         flags.has_table
@@ -244,7 +264,7 @@ def _text_overlap_score(a: str, b: str) -> int:
         return 0
     return len(a_tokens & b_tokens)
 
-# HTML extraction: when _should_store_html is true (table, code, definition list, or admonition present),
+# HTML extraction: when _should_store_html is true (table, code, math, definition list, or admonition present),
 # finds the best-matching HTML element, then narrows further to the specific flagged sub-element 
 # (e.g. the <table> inside it) and returns its raw HTML string - stored in html_text.
 #
@@ -327,6 +347,58 @@ def _extract_html_snippet(
     if best_tag is None:
         return None
     return str(best_tag)
+
+
+def _enrich_parent_chunks_with_rich_content(
+    parents: list[Chunk],
+    children: list[Chunk],
+    full_html: str | None,
+) -> None:
+    """Propagate rich-content metadata and HTML surface to parent chunks.
+
+    Parents are the retrieval context unit, so they must carry:
+    - aggregated rich-content flags (any child flag -> parent flag),
+    - html_text when rich content exists, with child snippet fallback.
+    """
+    if not parents or not children:
+        return
+
+    children_by_parent: dict[object, list[Chunk]] = {}
+    for child in children:
+        if child.parent_id is None:
+            continue
+        children_by_parent.setdefault(child.parent_id, []).append(child)
+
+    html_soup = _soup_from_html(full_html) if full_html else None
+    html_candidates: list[Tag] | None = None
+    prepared_candidates: list[tuple[Tag, set[str]]] | None = None
+    if html_soup:
+        html_candidates = _collect_html_candidates(html_soup)
+        prepared_candidates = _prepare_candidate_tokens(html_candidates)
+
+    for parent in parents:
+        parent_children = children_by_parent.get(parent.id, [])
+        if not parent_children:
+            continue
+
+        parent.flags = _aggregate_flags_from_children(parent_children)
+        if not _should_store_html(parent.flags):
+            parent.html_text = None
+            continue
+
+        parent_html = _extract_html_snippet(
+            parent.chunk_text,
+            html_soup,
+            parent.flags,
+            html_candidates,
+            prepared_candidates,
+        )
+        if parent_html is None:
+            for child in parent_children:
+                if child.html_text:
+                    parent_html = child.html_text
+                    break
+        parent.html_text = parent_html
 
 # Text splitting (_recursive_token_split, _greedy_word_split, _split_keep_separator)
 # fallback chain for oversized text. Tries splitting on \n\n, then \n, then . , then  . If even single words exceed the token limit 
@@ -561,7 +633,7 @@ def _child_chunks_from_parent(
         html_candidates = _collect_html_candidates(scoped_root)
         prepared_candidates = _prepare_candidate_tokens(html_candidates)
 
-    for block_text, rel_start, rel_end in paragraph_blocks:
+    for block_text, rel_start, _rel_end in paragraph_blocks:
         abs_start = parent.char_start + rel_start
 
         split_texts = _recursive_token_split(block_text, settings.child_target_tokens)
@@ -665,7 +737,12 @@ def build_chunks(
     title: str | None,
     depth: int,
 ) -> tuple[list[Chunk], list[Chunk]]:
-    """Split a document into parent and child chunks with rich-content flags."""
+    """Split one document into parent+child chunks and enrich parent metadata.
+
+    Returns:
+    - parents: context units returned by retrieval.
+    - children: embedding/search units linked to parents by parent_id.
+    """
     if not markdown:
         return [], []
 
@@ -693,6 +770,7 @@ def build_chunks(
             title=title,
             depth=depth,
         )
+        _enrich_parent_chunks_with_rich_content(fallback_parents, fallback_children, html)
         return fallback_parents, fallback_children
 
     parent_chunks = _parent_chunks_from_sections(
@@ -706,5 +784,7 @@ def build_chunks(
     child_chunks: list[Chunk] = []
     for parent in parent_chunks:
         child_chunks.extend(_child_chunks_from_parent(parent, html))
+
+    _enrich_parent_chunks_with_rich_content(parent_chunks, child_chunks, html)
 
     return parent_chunks, child_chunks

@@ -1,25 +1,59 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import sys
 
 import pytest
+import pytest_asyncio
 from typing import Any
+
+from psycopg import AsyncConnection
+from pgvector.psycopg import register_vector_async
 
 from config import settings
 from src.indexing.schema import init_schema
 
 
+# ---------------------------------------------------------------------------
+# Windows event loop fix: psycopg3 AsyncConnection requires SelectorEventLoop,
+# not ProactorEventLoop (the default on Windows).
+# ---------------------------------------------------------------------------
+if sys.platform == "win32":
+    # Override the default event loop policy globally so that asyncio.run()
+    # and pytest-asyncio both create compatible event loops.
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # Patch SelectSelector._select to tolerate stale socket fds.
+    # When psycopg closes a connection the OS fd is freed, but it may
+    # still be registered in the selector's reader/writer sets.  On
+    # shutdown, _cancel_all_tasks → select.select() hits the stale fd
+    # and raises OSError [WinError 10038].  This is harmless — suppress
+    # it so pytest-asyncio teardown completes cleanly.
+    import selectors as _selectors
+
+    _original_select = _selectors.SelectSelector._select
+
+    def _safe_select(self, r, w, _, timeout=None):  # type: ignore[override]
+        try:
+            return _original_select(self, r, w, _, timeout)
+        except OSError:
+            # Stale fd during shutdown — return empty sets.
+            return [], [], []
+
+    _selectors.SelectSelector._select = _safe_select  # type: ignore[assignment]
 def _schema_exists(conn: Any) -> bool:
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT
                 to_regclass('public.documents') IS NOT NULL,
-                to_regclass('public.chunks') IS NOT NULL
+                to_regclass('public.chunks') IS NOT NULL,
+                to_regclass('public.link_candidates') IS NOT NULL
             """
         )
         row = cur.fetchone()
-    return bool(row and row[0] and row[1])
+    return bool(row and row[0] and row[1] and row[2])
 
 
 @pytest.fixture(scope="session")
@@ -75,7 +109,37 @@ def reset_index_tables(db_conn: Any):
     def _reset() -> None:
         with db_conn.transaction():
             with db_conn.cursor() as cur:
+                cur.execute("TRUNCATE TABLE link_candidates CASCADE;")
                 cur.execute("TRUNCATE TABLE chunks CASCADE;")
                 cur.execute("TRUNCATE TABLE documents CASCADE;")
 
     return _reset
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def async_db_conn() -> Any:
+    """Provide a session-scoped AsyncConnection for tests that call async
+    retrieval functions (e.g. retrieve()).  register_vector_async is called
+    so pgvector types are correctly handled.
+
+    Uses autocommit=True to match the sync db_conn fixture behaviour —
+    every statement auto-commits, avoiding lock contention with
+    index_batch's separate connection.
+    """
+    database_url = os.getenv("DATABASE_URL") or settings.database_url
+    if not database_url:
+        pytest.skip("Skipping async DB tests: DATABASE_URL is not set.")
+
+    conn = await AsyncConnection.connect(database_url, autocommit=True)
+    await register_vector_async(conn)
+    try:
+        yield conn
+    finally:
+        try:
+            await conn.close()
+        except OSError:
+            # Windows SelectorEventLoop: closing the connection may leave
+            # a stale fd in the selector's set, causing select.select() to
+            # raise OSError [WinError 10038].  Safe to ignore during
+            # teardown — the socket is already closed.
+            pass

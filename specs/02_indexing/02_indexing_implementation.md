@@ -120,6 +120,16 @@ Detection rules updated after auditing real Firecrawl output (Feb 2026). Firecra
 - Steps:
   - Ordered list markers `1.` and `1)`, including nested ordered lists
 
+# Parent Rich-Content Propagation
+Parent chunks are retrieval's context unit, so parent rows must carry rich-content metadata.
+
+Implemented behavior in chunker:
+- Aggregate parent flags from all children (`any` per flag).
+- Populate parent `html_text` whenever a parent has a rich-content flag that requires HTML surface fidelity (`has_table`, `has_code`, `has_math`, `has_definition_list`, `has_admonition`).
+- Prefer parent-context HTML extraction; fall back to first available child `html_text` when extraction is ambiguous.
+
+Result: retrieval surface selection can operate directly on parent rows without child joins or post-processing.
+
 # Config
 There is a single config file at config.py (project root) that all layers import from. It loads all env vars via python-dotenv and exposes a single Pydantic config object. Indexing-specific fields (embedding model, dims, tokenizer, DB connection string) live there alongside ingestion fields. No layer has its own config module.
 

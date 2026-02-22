@@ -30,10 +30,12 @@ def _as_dict(result: Any) -> dict[str, Any]:
     return {}
 
 
-def test_firecrawl_batch_output():
+@pytest.mark.asyncio
+async def test_firecrawl_batch_output():
     firecrawl_client = _import_client_or_skip()
 
-    results = firecrawl_client.batch_scrape([VALID_URL, INVALID_URL])
+    # batch_scrape() is now async.
+    results = await firecrawl_client.batch_scrape([VALID_URL, INVALID_URL])
 
     print("Batch results count:", len(results))
     for index, item in enumerate(results):

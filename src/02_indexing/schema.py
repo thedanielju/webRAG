@@ -118,4 +118,40 @@ def init_schema(conn: Connection) -> None:
             """
         )
 
+        # ── link_candidates ─────────────────────────────────────
+        # Stores outgoing links found on ingested pages.  Rows are
+        # inserted URL-only at index time (title/description NULL),
+        # then enriched via the Firecrawl /map endpoint on-demand
+        # when orchestration needs link scoring metadata.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS link_candidates (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                source_document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                source_url TEXT NOT NULL,
+                target_url TEXT NOT NULL,
+                title TEXT NULL,
+                description TEXT NULL,
+                discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                enriched_at TIMESTAMPTZ NULL,
+                depth INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (source_document_id, target_url)
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_link_candidates_source
+            ON link_candidates (source_document_id);
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_link_candidates_target
+            ON link_candidates (target_url);
+            """
+        )
+
     conn.commit()

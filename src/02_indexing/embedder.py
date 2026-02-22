@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from config import settings
 from src.indexing.models import Chunk
@@ -20,8 +20,8 @@ from src.indexing.models import Chunk
 #
 # Concurrency model (embed_texts):
 #   Texts are split into batches of EMBEDDING_BATCH_SIZE (default 256)
-#   and dispatched to the embedding API via a ThreadPoolExecutor with
-#   at most EMBEDDING_MAX_WORKERS concurrent threads (default 4).
+#   and dispatched concurrently via asyncio.gather().  Each batch is
+#   an independent async HTTP request to the embedding API.
 #
 #   Why batching:
 #     A single API call with 1200 texts takes ~70s round-trip due to
@@ -29,39 +29,41 @@ from src.indexing.models import Chunk
 #     into 5-6 batches of 256 and sending them concurrently cuts
 #     wall-clock time to ~10-15s — the batches overlap on the wire.
 #
-#   Why default 4 workers:
-#     OpenAI enforces per-minute rate limits (RPM) that vary by API
-#     tier.  4 concurrent requests is safe for all paid tiers and
-#     most trial/free tiers.  Higher-tier plans or local servers
-#     (Ollama, LM Studio) can safely increase EMBEDDING_MAX_WORKERS
-#     to 8-12 via config.  Local servers have no rate limits, so the
-#     practical ceiling is CPU/GPU core count.
+#   Async migration:
+#     Replaced ThreadPoolExecutor + futures with asyncio.gather().
+#     This eliminates thread overhead and integrates cleanly with the
+#     orchestration layer's event loop for concurrent operations
+#     (parallel link expansion, embedding, DB queries).
 #
 #   Failure handling:
 #     If any single batch raises (timeout, 429, network error, etc.),
-#     the exception propagates immediately and fails the entire
-#     embed_texts() call.  No partial results are returned.  This is
-#     intentional — index_batch() treats embedding as all-or-nothing;
-#     partial vectors would leave chunks in an inconsistent state.
+#     asyncio.gather() propagates the first exception immediately.
+#     No partial results are returned.  This is intentional —
+#     index_batch() treats embedding as all-or-nothing; partial
+#     vectors would leave chunks in an inconsistent state.
 # ────────────────────────────────────────────────────────────────
 
 # four cached singletons - nothing loads at import time
 
-_CLIENT: OpenAI | None = None
+_CLIENT: AsyncOpenAI | None = None
+_CLIENT_LOOP_ID: int | None = None  # id() of the event loop the client was created in
 _TOKENIZER: Callable[[str], list[int]] | None = None
 _TIKTOKEN_ENCODING: Any | None = None
 _HF_TOKENIZER: Any | None = None
 
-# build the OpenAI client once using base_url from config; optional API key since local models don't need one
-# handles all providers
+# build the OpenAI client once per event loop; recreate when the loop changes
+# (e.g. between asyncio.run() calls in tests).  The client's internal httpx
+# transport is bound to the loop it was created in.
 
-def _get_client() -> OpenAI:
-    global _CLIENT
-    if _CLIENT is None:
+def _get_client() -> AsyncOpenAI:
+    global _CLIENT, _CLIENT_LOOP_ID
+    loop_id = id(asyncio.get_event_loop())
+    if _CLIENT is None or _CLIENT_LOOP_ID != loop_id:
         client_kwargs = {"base_url": settings.embedding_base_url}
         if settings.embedding_api_key:
             client_kwargs["api_key"] = settings.embedding_api_key
-        _CLIENT = OpenAI(**client_kwargs)
+        _CLIENT = AsyncOpenAI(**client_kwargs)
+        _CLIENT_LOOP_ID = loop_id
     return _CLIENT
 
 # builds simple text -> list[int] callable from whichever configured backend
@@ -193,21 +195,21 @@ def _token_boundary_map(markdown: str) -> list[int]:
 # ── Debug flag (same env var as indexer.py) ───────────────────
 _EMBEDDING_DEBUG = os.getenv("INDEXING_DEBUG", "").strip() == "1"
 
-# sends list of texts to the embedding API in concurrent batches;
+# sends list of texts to the embedding API in concurrent async batches;
 # validates every response has the right count and dimensionality.
 #
-# Concurrency uses ThreadPoolExecutor (stdlib, no asyncio) so the
-# indexing layer stays regular-def per the spec.  Each thread calls
-# _embed_single_batch() which is an isolated, stateless HTTP request.
+# Concurrency uses asyncio.gather() — each batch is an independent
+# coroutine that makes an async HTTP request via AsyncOpenAI.  This
+# replaces the previous ThreadPoolExecutor pattern, eliminating thread
+# overhead and integrating with the orchestration event loop.
 #
-# Failure semantics: if ANY batch raises, the exception propagates
-# out of the executor and fails the entire call — no partial vectors
-# are ever returned.
+# Failure semantics: if ANY batch raises, asyncio.gather() propagates
+# the first exception — no partial vectors are ever returned.
 
-def _embed_single_batch(batch: list[str]) -> list[list[float]]:
-    """Embed a single batch of texts.  Called from worker threads."""
+async def _embed_single_batch(batch: list[str]) -> list[list[float]]:
+    """Embed a single batch of texts.  Async coroutine — awaits the API call."""
     client = _get_client()
-    response = client.embeddings.create(model=settings.embedding_model, input=batch)
+    response = await client.embeddings.create(model=settings.embedding_model, input=batch)
     embeddings = [item.embedding for item in response.data]
     if len(embeddings) != len(batch):
         raise ValueError(
@@ -223,17 +225,16 @@ def _embed_single_batch(batch: list[str]) -> list[list[float]]:
     return embeddings
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Convert chunk texts to embedding vectors via concurrent API batches."""
+async def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Convert chunk texts to embedding vectors via concurrent async API batches."""
     if not texts:
         return []
 
     batch_size = settings.embedding_batch_size
-    max_workers = settings.embedding_max_workers
 
-    # Fast path: if everything fits in one batch, skip the executor overhead.
+    # Fast path: if everything fits in one batch, call directly.
     if len(texts) <= batch_size:
-        return _embed_single_batch(texts)
+        return await _embed_single_batch(texts)
 
     # Split texts into sequential batches, preserving order.
     batches: list[list[str]] = [
@@ -242,30 +243,19 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     if _EMBEDDING_DEBUG:
         print(
             f"embed_texts: dispatching {len(texts)} texts "
-            f"in {len(batches)} batches (size={batch_size}, workers={max_workers})"
+            f"in {len(batches)} batches (size={batch_size})"
         )
 
-    # results_by_index preserves input ordering regardless of completion order.
-    results_by_index: dict[int, list[list[float]]] = {}
+    # asyncio.gather dispatches all batches concurrently and returns
+    # results in submission order — preserving the input text ordering.
+    batch_results = await asyncio.gather(
+        *[_embed_single_batch(batch) for batch in batches]
+    )
 
-    # ThreadPoolExecutor.submit + as_completed gives us:
-    #   - concurrent HTTP requests (threads release the GIL on I/O)
-    #   - fail-fast: first exception is raised immediately, cancelling
-    #     remaining futures and preventing partial-result return
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_index = {
-            executor.submit(_embed_single_batch, batch): idx
-            for idx, batch in enumerate(batches)
-        }
-        for future in as_completed(future_to_index):
-            idx = future_to_index[future]
-            # .result() re-raises any exception from the worker thread.
-            results_by_index[idx] = future.result()
-
-    # Reassemble in original order.
+    # Flatten batch results into a single list, maintaining order.
     all_embeddings: list[list[float]] = []
-    for idx in range(len(batches)):
-        all_embeddings.extend(results_by_index[idx])
+    for result in batch_results:
+        all_embeddings.extend(result)
 
     return all_embeddings
 
@@ -289,3 +279,9 @@ def annotate_token_offsets(chunks: list[Chunk], markdown: str) -> None:
             end_index = start_index
         chunk.token_start = boundaries[start_index]
         chunk.token_end = boundaries[end_index]
+
+
+async def embed_query(text: str) -> list[float]:
+    """Embed a single retrieval query string."""
+    result = await embed_texts([text])
+    return result[0]

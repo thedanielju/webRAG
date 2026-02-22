@@ -54,10 +54,11 @@ def _metadata_dump(result: Any, payload: dict[str, Any]) -> dict[str, Any]:
 
 # calls the scrape wrapper, convert result to dict, print keys and a preview
 # and if the response isn't empty
-def test_firecrawl_scrape_smoke():
+@pytest.mark.asyncio
+async def test_firecrawl_scrape_smoke():
     firecrawl_client = _import_client_or_skip()
 
-    result = firecrawl_client.scrape(TEST_SCRAPE_URL)
+    result = await firecrawl_client.scrape(TEST_SCRAPE_URL)
     payload = _as_dict(result)
     metadata_dump = _metadata_dump(result, payload)
 
@@ -72,10 +73,11 @@ def test_firecrawl_scrape_smoke():
     ), f"Unexpected scrape payload shape: {sorted(payload.keys())}"
 
 
-def test_firecrawl_map_smoke():
+@pytest.mark.asyncio
+async def test_firecrawl_map_smoke():
     firecrawl_client = _import_client_or_skip()
 
-    raw_map_result = firecrawl_client.app.map(TEST_MAP_URL)
+    raw_map_result = await firecrawl_client.app.map(TEST_MAP_URL)
     print("Raw SDK map type:", type(raw_map_result))
 
     if hasattr(raw_map_result, "links"):
@@ -91,7 +93,7 @@ def test_firecrawl_map_smoke():
     assert isinstance(raw_links, list), "SDK map did not return a list-like links payload"
 
     try:
-        wrapper_links = firecrawl_client.map(TEST_MAP_URL)
+        wrapper_links = await firecrawl_client.map(TEST_MAP_URL)
     except ValueError as exc:
         pytest.xfail(f"Wrapper map() does not yet handle SDK MapData response: {exc}")
 

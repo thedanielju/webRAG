@@ -39,3 +39,14 @@ building is slice-based - one thin end to end path first, then deepen layers
 4. minimal citations (stored chunk quotations)
 5. orchestrator loop - expand if insufficient
 6. harden each layer (rate limits, dedupe, rerank, etc)
+
+## mvp decision: named corpora
+
+- for MVP: no named corpora
+- why:
+- implicit corpus (all indexed documents in DB) already gives persistence + caching
+- named corpora adds UI/UX complexity in chat flows (create/name/manage through an LLM interface)
+- core scoping use case is already covered by retrieval filtering (for example, `source_url` constraints)
+- v2 path:
+- if logical grouping is needed later, add `corpora` table + `corpus_id` FK on `documents`
+- do not design around named corpora in MVP
