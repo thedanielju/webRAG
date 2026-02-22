@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Give your LLM a research memory.</strong><br>
-  WebRAG indexes web pages and retrieves cited evidence so AI models can reason over real sources — not training data.
+  WebRAG indexes web pages and retrieves cited evidence so AI models can reason over real sources - not training data.
 </p>
 
 <p align="center">
@@ -23,13 +23,13 @@ WebRAG is a **Model Context Protocol (MCP)** server that turns web pages into se
 2. The LLM calls WebRAG's `answer` tool via MCP
 3. WebRAG scrapes the page, chunks it, embeds it, and stores it in Postgres
 4. It retrieves the most relevant passages and optionally follows links to expand the corpus
-5. The LLM receives cited evidence — verbatim quotes with source URLs — and reasons over it
+5. The LLM receives cited evidence - verbatim quotes with source URLs - and reasons over it
 
 **Why not just paste the page into the chat?**
 - Pages can be too large for context windows
 - Multi-page research requires following links and building a corpus over time
 - WebRAG handles chunking, embedding, retrieval, reranking, and citation extraction automatically
-- The corpus persists between conversations — ask follow-up questions without re-scraping
+- The corpus persists between conversations; ask follow-up questions without re-scraping
 
 ---
 
@@ -43,8 +43,8 @@ WebRAG is a **Model Context Protocol (MCP)** server that turns web pages into se
 | **Rich Content Handling** | Preserves tables, code blocks, math (MathML → LaTeX), and images through HTML surface detection. The formatter converts these to clean, readable text for the model. |
 | **Provider-Agnostic Reranking** | Supports ZeroEntropy, Cohere, Jina, or no reranking. Dramatically improves result quality by rescoring passages with a cross-encoder. |
 | **Query Decomposition** | Complex questions are split into sub-queries (via LLM or rule-based patterns) and retrieved concurrently. Results are merged with MMR deduplication. |
-| **Citation Fidelity** | Verbatim quotes reconstructed from stored character offsets. No paraphrasing — every citation maps to exact source text. |
-| **Intelligent Stopping** | 11-rule decision matrix evaluates score distributions to decide when to stop expanding. Token budget saturation, plateau detection, and diminishing returns — not arbitrary depth limits. |
+| **Citation Fidelity** | Verbatim quotes reconstructed from stored character offsets. No paraphrasing - every citation maps to exact source text. |
+| **Intelligent Stopping** | 11-rule decision matrix evaluates score distributions to decide when to stop expanding. Token budget saturation, plateau detection, and diminishing returns - not arbitrary depth limits. |
 | **Persistent Memory** | Indexed content lives in Postgres. Ask follow-up questions hours later without re-scraping. |
 
 ---
@@ -323,71 +323,44 @@ webRAG/
 ```
                     ┌─────────────────────────────────┐
                     │         MCP Client (LLM)        │
-                    │   Claude Desktop / Cursor / etc  │
+                    │   Claude Desktop / Cursor / etc │
                     └──────────────┬──────────────────┘
                                    │ answer(url, query)
                     ┌──────────────▼──────────────────┐
-                    │        MCP Server (Layer 5)      │
-                    │   tools.py → formatter.py        │
+                    │        MCP Server (Layer 5)     │
+                    │   tools.py → formatter.py       │
                     └──────────────┬──────────────────┘
                                    │
                     ┌──────────────▼──────────────────┐
-                    │     Orchestration (Layer 4)       │
-                    │                                   │
-                    │  ┌─ Ingest seed URL               │
-                    │  ├─ Decompose query                │
-                    │  ├─ Retrieve + Rerank              │
-                    │  ├─ Evaluate quality signals        │
-                    │  ├─ Expand corpus (if needed) ──┐  │
-                    │  │  ├─ Score candidate links     │  │
-                    │  │  ├─ Scrape top picks          │  │
-                    │  │  └─ Re-index + re-retrieve    │  │
-                    │  ├─────────────────────────────┘  │
-                    │  ├─ Locality expansion             │
-                    │  └─ Merge + dedup + cite           │
+                    │     Orchestration (Layer 4)     │
+                    │                                 │
+                    │  ┌─ Ingest seed URL             │
+                    │  ├─ Decompose query             │
+                    │  ├─ Retrieve + Rerank           │
+                    │  ├─ Evaluate quality signals    │
+                    │  ├─ Expand corpus (if needed)──┐│
+                    │  │  ├─ Score candidate links   ││
+                    │  │  ├─ Scrape top picks        ││
+                    │  │  └─ Re-index + re-retrieve  ││
+                    │  ├─────────────────────────────┘│
+                    │  ├─ Locality expansion          │
+                    │  └─ Merge + dedup + cite        │
                     └──────────────┬──────────────────┘
                                    │
               ┌────────────────────┼────────────────────┐
               ▼                    ▼                    ▼
-     ┌────────────┐      ┌────────────┐      ┌────────────┐
-     │ Retrieval   │      │  Indexing   │      │ Ingestion  │
-     │ (Layer 3)   │      │ (Layer 2)   │      │ (Layer 1)  │
-     │ ANN search  │      │ Chunk+Embed │      │ Firecrawl  │
-     └──────┬─────┘      └──────┬─────┘      └──────┬─────┘
-            │                    │                    │
-            └────────────────────┼────────────────────┘
-                                 ▼
-                    ┌─────────────────────────┐
-                    │   Postgres + pgvector    │
-                    │   documents | chunks     │
-                    │   HNSW vector index      │
-                    └─────────────────────────┘
+         ┌────────────┐     ┌────────────┐      ┌────────────┐
+         │ Retrieval  │     │  Indexing  │      │ Ingestion  │
+         │ (Layer 3)  │     │ (Layer 2)  │      │ (Layer 1)  │
+         │ ANN search │     │ Chunk+Embed│      │ Firecrawl  │
+         └──────┬─────┘     └──────┬─────┘      └──────┬─────┘
+                │                  │                   │
+                └──────────────────┼───────────────────┘
+                                   ▼
+                        ┌─────────────────────────┐
+                        │   Postgres + pgvector   │
+                        │   documents | chunks    │
+                        │   HNSW vector index     │
+                        └─────────────────────────┘
 ```
-
 ---
-
-## Running Tests
-
-```bash
-# Run all tests
-python -m pytest tests/ -v
-
-# Run specific test modules
-python -m pytest tests/test_mcp_formatter.py -v
-python -m pytest tests/test_orchestration.py -v
-
-# Run with coverage
-python -m pytest tests/ --cov=src --cov-report=term-missing
-```
-
-> **Note:** Some integration tests hit live APIs (Firecrawl, embedding, reranker) and may be rate-limited. Unit tests are fully mocked and run in <1 second.
-
----
-
-## Requirements
-
-- **Python 3.11+**
-- **Docker** (for Postgres + pgvector)
-- **Firecrawl API key** (web scraping)
-- **Embedding API** (OpenAI default, or local via Ollama/LM Studio)
-- **Reranker API** (optional but recommended: ZeroEntropy, Cohere, or Jina)
