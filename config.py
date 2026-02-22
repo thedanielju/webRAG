@@ -95,5 +95,85 @@ class Settings(BaseSettings):
         default=100, validation_alias="RETRIEVAL_HNSW_EF_SEARCH"
     )
 
+    # ── Orchestration: Query Analysis ─────────────────────────────
+    orchestration_llm_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        validation_alias="ORCHESTRATION_LLM_BASE_URL",
+    )
+    orchestration_llm_api_key: str | None = Field(
+        default=None, validation_alias="ORCHESTRATION_LLM_API_KEY"
+    )
+    orchestration_llm_model: str = Field(
+        default="gpt-4o-mini", validation_alias="ORCHESTRATION_LLM_MODEL"
+    )
+    decomposition_mode: str = Field(
+        default="llm", validation_alias="DECOMPOSITION_MODE"
+    )
+
+    # ── Orchestration: Reranking ──────────────────────────────────
+    reranker_provider: str = Field(
+        default="zeroentropy", validation_alias="RERANKER_PROVIDER"
+    )
+    reranker_api_key: str | None = Field(
+        default=None, validation_alias="RERANKER_API_KEY"
+    )
+    reranker_model: str = Field(
+        default="zerank-2", validation_alias="RERANKER_MODEL"
+    )
+    reranker_top_n: int = Field(
+        default=20, validation_alias="RERANKER_TOP_N"
+    )
+
+    # ── Orchestration: Expansion ──────────────────────────────────
+    max_expansion_depth: int = Field(
+        default=5, validation_alias="MAX_EXPANSION_DEPTH"
+    )
+    max_candidates_per_iteration: int = Field(
+        default=5, validation_alias="MAX_CANDIDATES_PER_ITERATION"
+    )
+    candidates_to_score_per_iteration: int = Field(
+        default=20, validation_alias="CANDIDATES_TO_SCORE_PER_ITERATION"
+    )
+    expansion_map_limit: int = Field(
+        default=100, validation_alias="EXPANSION_MAP_LIMIT"
+    )
+
+    # ── Orchestration: Locality Expansion ─────────────────────────
+    locality_expansion_enabled: bool = Field(
+        default=True, validation_alias="LOCALITY_EXPANSION_ENABLED"
+    )
+    locality_expansion_radius: int = Field(
+        default=1, validation_alias="LOCALITY_EXPANSION_RADIUS"
+    )
+
+    # ── Orchestration: Stopping Criteria ──────────────────────────
+    token_budget_saturation_ratio: float = Field(
+        default=0.8, validation_alias="TOKEN_BUDGET_SATURATION_RATIO"
+    )
+    redundancy_ceiling: float = Field(
+        default=0.85, validation_alias="REDUNDANCY_CEILING"
+    )
+    score_cliff_threshold: float = Field(
+        default=0.15, validation_alias="SCORE_CLIFF_THRESHOLD"
+    )
+    score_cliff_rank_k: int = Field(
+        default=5, validation_alias="SCORE_CLIFF_RANK_K"
+    )
+    plateau_variance_threshold: float = Field(
+        default=0.02, validation_alias="PLATEAU_VARIANCE_THRESHOLD"
+    )
+    plateau_top_n: int = Field(
+        default=10, validation_alias="PLATEAU_TOP_N"
+    )
+    diminishing_return_delta: float = Field(
+        default=0.03, validation_alias="DIMINISHING_RETURN_DELTA"
+    )
+    mediocre_score_floor: float = Field(
+        default=0.5, validation_alias="MEDIOCRE_SCORE_FLOOR"
+    )
+    confidence_floor: float = Field(
+        default=0.3, validation_alias="CONFIDENCE_FLOOR"
+    )
+
 
 settings = Settings()

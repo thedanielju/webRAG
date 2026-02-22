@@ -49,7 +49,26 @@ OpenAI (default):
 
 Local endpoint is supported too (OpenAI-compatible base URL). Update model, dimensions, and tokenizer fields accordingly.
 
-## 5) MCP usage flow
+## 5) Orchestration setup
+
+The orchestration layer handles corpus expansion (retrieve → evaluate → expand loop). Most defaults work out of the box; configure these as needed:
+
+**Reranker** (optional — improves result quality):
+- `RERANKER_PROVIDER` — `zeroentropy`, `cohere`, `jina`, or `none` (default: `none`).
+- Set the matching API key: `ZEROENTROPY_API_KEY`, `COHERE_API_KEY`, or `JINA_API_KEY`.
+
+**Query decomposition** (optional — helps with complex queries):
+- `DECOMPOSITION_MODE` — `llm`, `rule_based`, or `none` (default: `rule_based`).
+- If using `llm` mode: set `ORCHESTRATION_LLM_API_KEY` and optionally `ORCHESTRATION_LLM_BASE_URL` / `ORCHESTRATION_LLM_MODEL`.
+
+**Expansion tuning**:
+- `MAX_EXPANSION_DEPTH` — hard cap on expansion iterations (default: 3).
+- `RETRIEVAL_CONTEXT_BUDGET` — target token count for the context window (default: 4096).
+- `MAX_CANDIDATES_PER_ITERATION` — how many links to scrape per expansion round (default: 3).
+
+All orchestration settings are documented in `blank.env`.
+
+## 6) MCP usage flow
 
 Typical local flow:
 1. Clone repo

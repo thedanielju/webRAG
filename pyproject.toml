@@ -12,6 +12,7 @@ dependencies = [
     "pytest",
     "pytest-asyncio",
     "psycopg[binary]",
+    "psycopg-pool",
     "pgvector",
     "openai",
     "tiktoken",
@@ -20,6 +21,9 @@ dependencies = [
     "lxml",
     "pydantic",
     "pydantic-settings",
+    "zeroentropy",
+    "cohere",
+    "httpx",
 ]
 
 [tool.setuptools]

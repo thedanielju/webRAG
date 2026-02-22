@@ -100,19 +100,45 @@ Responsibilities:
 - Citation generation uses stored offsets to return verbatim spans.
 
 ## ORCHESTRATION LAYER
-The orchestration layer implements the corpus expansion loop
+The orchestration layer implements the retrieve-evaluate-expand loop that
+decides when the corpus is "good enough" and when to grow it.
 
-Loop behavior:
-1. Retrieve evidence from existing corpus
-2. If insufficient coverage:
-- identify candidate sublinks
-- score link relevance
-- ingest top candidates
-3. Re-index new content
-4. Re-run retrieval
-5. Terminate when stopping conditions are met
+### Module breakdown
+| Module            | Responsibility |
+|-------------------|----------------|
+| `engine.py`       | Top-level entry point. Owns connection pool, drives the iteration loop, assembles the final result. |
+| `query_analyzer.py` | Decomposes a user query into sub-queries (LLM, rule-based, or passthrough). |
+| `reranker.py`     | Provider-agnostic reranking (ZeroEntropy, Cohere, Jina, or passthrough). |
+| `evaluator.py`    | Computes quality signals from score distributions and applies an 11-rule decision matrix (stop / expand_breadth / expand_recall / expand_intent). |
+| `expander.py`     | Scores candidate links (5 weighted signals), scrapes the top picks, and indexes them. |
+| `locality.py`     | Fetches adjacent sibling chunks around high-scoring hits (cheap DB query, no API calls). |
+| `merger.py`       | Unions chunks from multiple sub-queries, deduplicates with MMR (Jaccard text overlap), enforces a token budget. |
+| `models.py`       | Pydantic data contracts shared across the layer (QueryAnalysis, RankedChunk, EvaluationSignals, etc.). |
 
-Expansion always progresses one hierarchical level per iteration.
+### Loop behaviour
+1. Ensure seed URL is ingested and indexed.
+2. Analyse / decompose query into sub-queries.
+3. Retrieve → rerank → evaluate quality signals.
+4. If evaluator says **stop**: proceed to output.  
+   If **expand_breadth**: score candidate links, ingest top picks, re-retrieve over the larger corpus.  
+   If **expand_recall**: re-retrieve with a doubled token budget.  
+   If **expand_intent**: re-analyse the query with feedback from the failed retrieval.
+5. Repeat step 3–4 up to `max_expansion_depth` iterations.
+6. Optionally expand locality (adjacent parent chunks).
+7. Final merge, MMR dedup, token-budget trim, citation extraction.
+
+### Stop conditions (priority order)
+- Max expansion depth reached (safety cap).
+- Token budget filled with good-quality, non-redundant chunks.
+- Diminishing returns (recall proxy barely improved iteration-over-iteration).
+- Good plateau (low score variance, mean above mediocre floor).
+
+### Key configuration
+All orchestration config lives in `config.py` with env-var overrides documented in `blank.env`.  Critical knobs:
+- `RERANKER_PROVIDER` — which reranker to use (zeroentropy / cohere / jina / none).
+- `DECOMPOSITION_MODE` — query decomposition strategy (llm / rule_based / none).
+- `MAX_EXPANSION_DEPTH` — hard cap on expansion iterations.
+- `RETRIEVAL_CONTEXT_BUDGET` — target token count for the final context window.
 
 ## TARGETED EXPANSION STRATEGY
 Seed Set:
