@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Resolve .env relative to this file's directory (the project root),
+# not the working directory.  This ensures the .env is found even when
+# the process is launched with a different cwd (e.g. Claude Desktop).
+_ENV_FILE = Path(__file__).resolve().parent / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
+    model_config = SettingsConfigDict(env_file=str(_ENV_FILE), case_sensitive=False)
 
     # Ingestion / Firecrawl
     firecrawl_api_key: str | None = Field(default=None, validation_alias="FIRECRAWL_API_KEY")
