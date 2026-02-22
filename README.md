@@ -30,6 +30,7 @@ WebRAG is a **Model Context Protocol (MCP)** server that turns web pages into se
 - Multi-page research requires following links and building a corpus over time
 - WebRAG handles chunking, embedding, retrieval, reranking, and citation extraction automatically
 - The corpus persists between conversations; ask follow-up questions without re-scraping
+- Higher quality, informed responses with rich html content and relevant image links. 
 
 ---
 
