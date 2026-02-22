@@ -20,10 +20,13 @@ from bs4 import BeautifulSoup
 from bs4.element import Tag
 
 from config import settings
-from src.indexing.models import Chunk, ChunkLevel, RichContentFlags
+from src.indexing.models import Chunk, ChunkImageRef, ChunkLevel, RichContentFlags
 
 
 _TOKEN_COUNTER: Callable[[str], int] | None = None
+_MARKDOWN_IMAGE_RE = re.compile(
+    r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)\s]+)(?:\s+\"(?P<title>[^\"]*)\")?\)"
+)
 
 # tokenization - loads whichever tokenizer is configured (tiktoken or HuggingFace) lazily on first calls, cached in _TOKEN_COUNTER
 
@@ -226,6 +229,157 @@ def _merge_flags(a: RichContentFlags, b: RichContentFlags) -> RichContentFlags:
     )
 
 
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = re.sub(r"\s+", " ", value).strip()
+    return normalized or None
+
+
+def _dedupe_image_refs(image_refs: list[ChunkImageRef]) -> list[ChunkImageRef]:
+    deduped: list[ChunkImageRef] = []
+    seen: set[tuple[str, str | None, str | None, str | None]] = set()
+    for image in image_refs:
+        key = (
+            image.url.strip(),
+            _normalize_optional_text(image.alt),
+            _normalize_optional_text(image.title),
+            _normalize_optional_text(image.caption),
+        )
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            ChunkImageRef(
+                url=key[0],
+                alt=key[1],
+                title=key[2],
+                caption=key[3],
+            )
+        )
+    return deduped
+
+
+def _extract_markdown_image_refs(markdown_chunk_text: str) -> list[ChunkImageRef]:
+    refs: list[ChunkImageRef] = []
+    for match in _MARKDOWN_IMAGE_RE.finditer(markdown_chunk_text):
+        url = match.group("url").strip()
+        if not url:
+            continue
+        refs.append(
+            ChunkImageRef(
+                url=url,
+                alt=_normalize_optional_text(match.group("alt")),
+                title=_normalize_optional_text(match.group("title")),
+                caption=None,
+            )
+        )
+    return _dedupe_image_refs(refs)
+
+
+def _image_caption_for_tag(img_tag: Tag) -> str | None:
+    figure = img_tag.find_parent("figure")
+    if figure is not None:
+        figcaption = figure.find("figcaption")
+        if figcaption is not None:
+            return _normalize_optional_text(figcaption.get_text(" ", strip=True))
+
+    # Lightweight fallback: common adjacent caption patterns.
+    next_tag = img_tag.find_next_sibling()
+    if isinstance(next_tag, Tag) and next_tag.name in {"figcaption", "caption"}:
+        return _normalize_optional_text(next_tag.get_text(" ", strip=True))
+    return None
+
+
+def _extract_html_image_refs(
+    markdown_chunk_text: str,
+    soup: BeautifulSoup | None,
+    candidates: list[Tag] | None = None,
+    prepared_candidates: list[tuple[Tag, set[str]]] | None = None,
+) -> list[ChunkImageRef]:
+    if soup is None:
+        return []
+
+    context_tag = _best_matching_html_tag(
+        markdown_chunk_text,
+        soup,
+        candidates,
+        prepared_candidates,
+    )
+    if context_tag is None:
+        return []
+
+    img_tags: list[Tag] = []
+    if context_tag.name == "img":
+        img_tags.append(context_tag)
+    img_tags.extend(context_tag.find_all("img"))
+
+    refs: list[ChunkImageRef] = []
+    for img in img_tags:
+        url = (
+            img.get("src")
+            or img.get("data-src")
+            or img.get("data-original")
+            or img.get("data-lazy-src")
+        )
+        if not isinstance(url, str) or not url.strip():
+            continue
+        refs.append(
+            ChunkImageRef(
+                url=url.strip(),
+                alt=_normalize_optional_text(img.get("alt") if isinstance(img.get("alt"), str) else None),
+                title=_normalize_optional_text(img.get("title") if isinstance(img.get("title"), str) else None),
+                caption=_image_caption_for_tag(img),
+            )
+        )
+
+    return _dedupe_image_refs(refs)
+
+
+def _merge_image_refs(
+    markdown_refs: list[ChunkImageRef],
+    html_refs: list[ChunkImageRef],
+) -> list[ChunkImageRef]:
+    """Prefer HTML metadata, but keep markdown-only image refs if unmatched."""
+    if not html_refs:
+        return _dedupe_image_refs(markdown_refs)
+    if not markdown_refs:
+        return _dedupe_image_refs(html_refs)
+
+    html_by_url: dict[str, ChunkImageRef] = {ref.url: ref for ref in html_refs}
+    merged: list[ChunkImageRef] = list(html_refs)
+
+    for md_ref in markdown_refs:
+        html_ref = html_by_url.get(md_ref.url)
+        if html_ref is None:
+            merged.append(md_ref)
+            continue
+        if not html_ref.alt and md_ref.alt:
+            html_ref.alt = md_ref.alt
+        if not html_ref.title and md_ref.title:
+            html_ref.title = md_ref.title
+
+    return _dedupe_image_refs(merged)
+
+
+def _image_context_text_from_refs(image_refs: list[ChunkImageRef]) -> str | None:
+    snippets: list[str] = []
+    seen: set[str] = set()
+    for image in image_refs:
+        for value in (image.alt, image.title, image.caption):
+            normalized = _normalize_optional_text(value)
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            snippets.append(normalized)
+    if not snippets:
+        return None
+    return " | ".join(snippets)
+
+
 def _aggregate_flags_from_children(children: list[Chunk]) -> RichContentFlags:
     """Aggregate rich-content flags from child chunks to parent-level truth."""
     return RichContentFlags(
@@ -236,6 +390,33 @@ def _aggregate_flags_from_children(children: list[Chunk]) -> RichContentFlags:
         has_admonition=any(child.flags.has_admonition for child in children),
         has_steps=any(child.flags.has_steps for child in children),
     )
+
+
+def _aggregate_parent_image_refs(children: list[Chunk]) -> list[ChunkImageRef]:
+    refs: list[ChunkImageRef] = []
+    for child in children:
+        refs.extend(child.image_refs)
+    return _dedupe_image_refs(refs)
+
+
+def _aggregate_parent_image_context(children: list[Chunk]) -> str | None:
+    snippets: list[str] = []
+    seen: set[str] = set()
+    for child in children:
+        if not child.image_context_text:
+            continue
+        for part in child.image_context_text.split("|"):
+            normalized = _normalize_optional_text(part)
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            snippets.append(normalized)
+    if not snippets:
+        return None
+    return " | ".join(snippets)
 
 
 def _should_store_html(flags: RichContentFlags) -> bool:
@@ -382,6 +563,9 @@ def _enrich_parent_chunks_with_rich_content(
             continue
 
         parent.flags = _aggregate_flags_from_children(parent_children)
+        parent.image_refs = _aggregate_parent_image_refs(parent_children)
+        parent.has_image = len(parent.image_refs) > 0
+        parent.image_context_text = _aggregate_parent_image_context(parent_children)
         if not _should_store_html(parent.flags):
             parent.html_text = None
             continue
@@ -664,6 +848,16 @@ def _child_chunks_from_parent(
                     prepared_candidates,
                 )
 
+            markdown_image_refs = _extract_markdown_image_refs(split_text)
+            html_image_refs = _extract_html_image_refs(
+                split_text,
+                html_soup,
+                html_candidates,
+                prepared_candidates,
+            )
+            image_refs = _merge_image_refs(markdown_image_refs, html_image_refs)
+            image_context_text = _image_context_text_from_refs(image_refs)
+
             children.append(
                 Chunk(
                     parent_id=parent.id,
@@ -679,6 +873,9 @@ def _child_chunks_from_parent(
                     fetched_at=parent.fetched_at,
                     depth=parent.depth,
                     title=parent.title,
+                    has_image=bool(image_refs),
+                    image_context_text=image_context_text,
+                    image_refs=image_refs,
                 )
             )
             child_index += 1

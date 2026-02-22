@@ -485,7 +485,16 @@ class OrchestratorEngine:
                     )
 
                 # Build passage texts for reranking.
-                passages = [c.selected_text for c in chunks_for_reranking]
+                passages: list[str] = []
+                for c in chunks_for_reranking:
+                    # Reranker strips HTML tags (including <img alt=...>), so
+                    # carry image semantics explicitly as plain text.
+                    if c.has_image and c.image_context_text:
+                        passages.append(
+                            f"{c.selected_text}\n\n[Image context]\n{c.image_context_text}"
+                        )
+                    else:
+                        passages.append(c.selected_text)
                 original_scores = [c.score for c in chunks_for_reranking]
 
                 # Build instruction for the reranker from intent.

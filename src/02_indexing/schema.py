@@ -68,6 +68,9 @@ def init_schema(conn: Connection) -> None:
                 has_definition_list BOOLEAN NOT NULL DEFAULT FALSE,
                 has_admonition BOOLEAN NOT NULL DEFAULT FALSE,
                 has_steps BOOLEAN NOT NULL DEFAULT FALSE,
+                has_image BOOLEAN NOT NULL DEFAULT FALSE,
+                image_context_text TEXT NULL,
+                image_refs_json TEXT NULL,
                 char_start INTEGER NOT NULL,
                 char_end INTEGER NOT NULL,
                 token_start INTEGER NOT NULL,
@@ -80,6 +83,27 @@ def init_schema(conn: Connection) -> None:
             );
             """
             % settings.embedding_dimensions
+        )
+
+        cur.execute(
+            """
+            ALTER TABLE chunks
+            ADD COLUMN IF NOT EXISTS has_image BOOLEAN NOT NULL DEFAULT FALSE;
+            """
+        )
+
+        cur.execute(
+            """
+            ALTER TABLE chunks
+            ADD COLUMN IF NOT EXISTS image_context_text TEXT NULL;
+            """
+        )
+
+        cur.execute(
+            """
+            ALTER TABLE chunks
+            ADD COLUMN IF NOT EXISTS image_refs_json TEXT NULL;
+            """
         )
 
         cur.execute(

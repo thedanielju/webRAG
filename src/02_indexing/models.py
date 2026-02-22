@@ -26,6 +26,16 @@ class RichContentFlags:
     has_admonition: bool = False
     has_steps: bool = False
 
+
+@dataclass
+class ChunkImageRef:
+    """Structured image metadata extracted from markdown/HTML around a chunk."""
+
+    url: str
+    alt: str | None = None
+    title: str | None = None
+    caption: str | None = None
+
 # central object, representing one chunk (parent or child) as it flows through pipeline
 @dataclass
 class Chunk:
@@ -47,3 +57,6 @@ class Chunk:
     fetched_at: datetime | None = None
     depth: int = 0
     title: str | None = None
+    has_image: bool = False
+    image_context_text: str | None = None
+    image_refs: list[ChunkImageRef] = field(default_factory=list)

@@ -47,6 +47,7 @@ from __future__ import annotations
 # ────────────────────────────────────────────────────────────────
 
 from datetime import datetime, timezone
+import json
 import os
 import time
 from typing import TYPE_CHECKING
@@ -83,24 +84,9 @@ async def _ensure_schema_initialized(conn: AsyncConnection) -> None:
     global _SCHEMA_INITIALIZED
     if _SCHEMA_INITIALIZED:
         return
-    async with conn.cursor() as cur:
-        await cur.execute(
-            """
-            SELECT
-                to_regclass('public.documents') IS NOT NULL,
-                to_regclass('public.chunks') IS NOT NULL,
-                to_regclass('public.link_candidates') IS NOT NULL
-            """
-        )
-        row = await cur.fetchone()
-    schema_exists = bool(row and row[0] and row[1] and row[2])
-
-    if schema_exists:
-        _SCHEMA_INITIALIZED = True
-        return
-
-    # init_schema uses sync Connection — create a temporary one.
-    # This only runs once on first use when the schema doesn't exist.
+    # Always run init_schema() once per process.  It is idempotent and includes
+    # additive ALTER TABLE statements, so this acts as a lightweight migration
+    # step for existing DBs when new columns are introduced.
     from psycopg import connect as sync_connect
     with sync_connect(settings.database_url) as sync_conn:
         init_schema(sync_conn)
@@ -206,6 +192,24 @@ async def _insert_chunks(conn: AsyncConnection, chunks: list[Chunk]) -> None:
             "has_definition_list": chunk.flags.has_definition_list,
             "has_admonition": chunk.flags.has_admonition,
             "has_steps": chunk.flags.has_steps,
+            "has_image": chunk.has_image,
+            "image_context_text": chunk.image_context_text,
+            "image_refs_json": (
+                json.dumps(
+                    [
+                        {
+                            "url": image.url,
+                            "alt": image.alt,
+                            "title": image.title,
+                            "caption": image.caption,
+                        }
+                        for image in chunk.image_refs
+                    ],
+                    ensure_ascii=False,
+                )
+                if chunk.image_refs
+                else None
+            ),
             "char_start": chunk.char_start,
             "char_end": chunk.char_end,
             "token_start": chunk.token_start,
@@ -227,15 +231,17 @@ async def _insert_chunks(conn: AsyncConnection, chunks: list[Chunk]) -> None:
             INSERT INTO chunks (
                 id, document_id, parent_id, chunk_level, chunk_index, section_heading,
                 chunk_text, html_text, has_table, has_code, has_math, has_definition_list,
-                has_admonition, has_steps, char_start, char_end, token_start, token_end,
-                embedding, source_url, fetched_at, depth, title
+                has_admonition, has_steps, has_image, image_context_text, image_refs_json,
+                char_start, char_end, token_start, token_end, embedding, source_url,
+                fetched_at, depth, title
             )
             VALUES (
                 %(id)s, %(document_id)s, %(parent_id)s, %(chunk_level)s, %(chunk_index)s,
                 %(section_heading)s, %(chunk_text)s, %(html_text)s, %(has_table)s,
                 %(has_code)s, %(has_math)s, %(has_definition_list)s, %(has_admonition)s,
-                %(has_steps)s, %(char_start)s, %(char_end)s, %(token_start)s, %(token_end)s,
-                %(embedding)s, %(source_url)s, %(fetched_at)s, %(depth)s, %(title)s
+                %(has_steps)s, %(has_image)s, %(image_context_text)s, %(image_refs_json)s,
+                %(char_start)s, %(char_end)s, %(token_start)s, %(token_end)s, %(embedding)s,
+                %(source_url)s, %(fetched_at)s, %(depth)s, %(title)s
             )
             """,
             params_list,
@@ -310,6 +316,17 @@ def _build_doc_chunks(
         chunk.document_id = document_id
 
     return parent_chunks, child_chunks
+
+
+def _embedding_text_for_child(chunk: Chunk) -> str:
+    """Augment embedding text with deterministic image context when available.
+
+    This improves matching for queries like "diagram"/"figure"/"chart" without
+    changing stored chunk_text or any citation offsets.
+    """
+    if not chunk.image_context_text:
+        return chunk.chunk_text
+    return f"{chunk.chunk_text}\n\nImage context: {chunk.image_context_text}"
 
 
 async def index_document(doc: NormalizedDocument, depth: int) -> None:
@@ -416,7 +433,7 @@ async def index_batch(
         for item in staged_items:
             children = item["child_chunks"]
             all_child_chunks.extend(children)
-            all_child_texts.extend(c.chunk_text for c in children)
+            all_child_texts.extend(_embedding_text_for_child(c) for c in children)
 
         if _INDEXING_DEBUG:
             parent_count = sum(len(item["parent_chunks"]) for item in staged_items)

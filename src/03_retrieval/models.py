@@ -4,7 +4,16 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class RetrievedImageRef(BaseModel):
+    """Image metadata attached to a returned chunk for MCP/client rendering."""
+
+    url: str
+    alt: str | None = None
+    title: str | None = None
+    caption: str | None = None
 
 
 class RetrievedChunk(BaseModel):
@@ -41,6 +50,9 @@ class RetrievedChunk(BaseModel):
     has_definition_list: bool
     has_admonition: bool
     has_steps: bool
+    has_image: bool = False
+    image_context_text: str | None = None
+    images: list[RetrievedImageRef] = Field(default_factory=list)
 
     # Metadata
     fetched_at: datetime

@@ -20,6 +20,7 @@ Async migration:
 """
 
 from collections import defaultdict
+import json
 from time import perf_counter
 from typing import Any
 import warnings
@@ -29,7 +30,13 @@ from psycopg.rows import dict_row
 
 from config import settings
 from src.indexing.embedder import embed_query
-from src.retrieval.models import CorpusStats, RetrievedChunk, RetrievalResult, TimingInfo
+from src.retrieval.models import (
+    CorpusStats,
+    RetrievedChunk,
+    RetrievedImageRef,
+    RetrievalResult,
+    TimingInfo,
+)
 
 
 def _normalize_source_urls(source_urls: list[str] | None) -> list[str] | None:
@@ -174,6 +181,17 @@ def _row_to_retrieved_chunk(
     raw_similarity: float | None,
 ) -> RetrievedChunk:
     selected_text, surface = _choose_surface(row)
+    image_refs: list[RetrievedImageRef] = []
+    raw_image_refs = row.get("image_refs_json")
+    if isinstance(raw_image_refs, str) and raw_image_refs.strip():
+        try:
+            parsed = json.loads(raw_image_refs)
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict) and isinstance(item.get("url"), str):
+                        image_refs.append(RetrievedImageRef(**item))
+        except Exception:
+            image_refs = []
     return RetrievedChunk(
         chunk_id=row["id"],
         document_id=row["document_id"],
@@ -197,6 +215,13 @@ def _row_to_retrieved_chunk(
         has_definition_list=bool(row["has_definition_list"]),
         has_admonition=bool(row["has_admonition"]),
         has_steps=bool(row["has_steps"]),
+        has_image=bool(row.get("has_image")),
+        image_context_text=(
+            str(row["image_context_text"])
+            if row.get("image_context_text") is not None
+            else None
+        ),
+        images=image_refs,
         fetched_at=row["fetched_at"],
     )
 
@@ -230,6 +255,7 @@ async def _query_full_context_parents(
                     chunk_text, html_text,
                     has_table, has_code, has_math,
                     has_definition_list, has_admonition, has_steps,
+                    has_image, image_context_text, image_refs_json,
                     char_start, char_end, token_start, token_end,
                     source_url, fetched_at, depth, title
                 FROM chunks
@@ -248,6 +274,7 @@ async def _query_full_context_parents(
                     chunk_text, html_text,
                     has_table, has_code, has_math,
                     has_definition_list, has_admonition, has_steps,
+                    has_image, image_context_text, image_refs_json,
                     char_start, char_end, token_start, token_end,
                     source_url, fetched_at, depth, title
                 FROM chunks
@@ -290,6 +317,7 @@ async def _run_hnsw_child_search(
                     chunk_text, html_text,
                     has_table, has_code, has_math,
                     has_definition_list, has_admonition, has_steps,
+                    has_image, image_context_text, image_refs_json,
                     char_start, char_end, token_start, token_end,
                     source_url, fetched_at, depth, title,
                     (embedding <=> %s::vector) AS distance
@@ -318,6 +346,7 @@ async def _run_hnsw_child_search(
                     chunk_text, html_text,
                     has_table, has_code, has_math,
                     has_definition_list, has_admonition, has_steps,
+                    has_image, image_context_text, image_refs_json,
                     char_start, char_end, token_start, token_end,
                     source_url, fetched_at, depth, title,
                     (embedding <=> %s::vector) AS distance
@@ -350,6 +379,7 @@ async def _fetch_parents_by_ids(conn: AsyncConnection, parent_ids: list[Any]) ->
                 chunk_text, html_text,
                 has_table, has_code, has_math,
                 has_definition_list, has_admonition, has_steps,
+                has_image, image_context_text, image_refs_json,
                 char_start, char_end, token_start, token_end,
                 source_url, fetched_at, depth, title
             FROM chunks

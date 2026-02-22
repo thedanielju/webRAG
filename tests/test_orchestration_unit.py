@@ -23,6 +23,7 @@ from config import settings
 from src.orchestration.models import (
     EvaluationSignals,
     ExpansionDecision,
+    OrchestrationState,
     QueryAnalysis,
     RankedChunk,
     RerankResult,
@@ -33,6 +34,7 @@ from src.retrieval.models import (
     PersistedLinkCandidate,
     RetrievalResult,
     RetrievedChunk,
+    RetrievedImageRef,
     TimingInfo,
 )
 
@@ -88,6 +90,9 @@ def _make_retrieved_chunk(
     has_definition_list: bool = False,
     has_admonition: bool = False,
     has_steps: bool = False,
+    has_image: bool = False,
+    image_context_text: str | None = None,
+    images: list[RetrievedImageRef] | None = None,
 ) -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=chunk_id or _make_chunk_id(),
@@ -112,6 +117,9 @@ def _make_retrieved_chunk(
         has_definition_list=has_definition_list,
         has_admonition=has_admonition,
         has_steps=has_steps,
+        has_image=has_image,
+        image_context_text=image_context_text,
+        images=list(images or []),
         fetched_at=datetime.now(timezone.utc),
     )
 
@@ -1416,6 +1424,119 @@ class TestEngineSinglePass:
         assert result.total_iterations == 0
         assert result.expansion_steps == []
         assert len(result.chunks) > 0
+
+
+class TestEngineRerankerImagePassageShaping:
+    """Verify image context is appended to reranker passages only when present."""
+
+    @pytest.mark.asyncio
+    async def test_includes_image_context_marker_when_present(self):
+        from src.orchestration.engine import OrchestratorEngine
+
+        engine = OrchestratorEngine()
+        state = OrchestrationState(
+            original_query="test query",
+            seed_url="https://example.com",
+            ingested_urls={"https://example.com"},
+        )
+
+        rr = _make_retrieval_result(
+            [
+                _make_retrieved_chunk(
+                    selected_text="<p>Chunk with diagram mention.</p>",
+                    has_image=True,
+                    image_context_text="system architecture diagram | deployment flow",
+                    images=[
+                        RetrievedImageRef(
+                            url="https://example.com/diagram.png",
+                            alt="System architecture diagram",
+                        )
+                    ],
+                )
+            ],
+            mode="chunk",
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_retrieve(*args, **kwargs):
+            return rr
+
+        async def _fake_rerank(query, passages, **kwargs):
+            captured["passages"] = list(passages)
+            return [RerankResult(index=0, relevance_score=0.9)]
+
+        with _override_settings(
+            reranker_provider="none",
+            reranker_top_n=10,
+            reranker_similarity_floor=0.0,
+        ):
+            with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
+                with patch.object(engine, "_release_connection", new_callable=AsyncMock):
+                    with patch("src.orchestration.engine.retrieve", AsyncMock(side_effect=_fake_retrieve)):
+                        with patch("src.orchestration.engine.rerank", AsyncMock(side_effect=_fake_rerank)):
+                            with patch(
+                                "src.orchestration.engine.merge_subquery_results",
+                                AsyncMock(return_value=[]),
+                            ):
+                                await engine._retrieve_and_rerank(["test subquery"], state)
+
+        assert "passages" in captured
+        assert len(captured["passages"]) == 1
+        assert "[Image context]" in captured["passages"][0]
+        assert "system architecture diagram" in captured["passages"][0]
+
+    @pytest.mark.asyncio
+    async def test_omits_image_context_marker_when_no_images(self):
+        from src.orchestration.engine import OrchestratorEngine
+
+        engine = OrchestratorEngine()
+        state = OrchestrationState(
+            original_query="test query",
+            seed_url="https://example.com",
+            ingested_urls={"https://example.com"},
+        )
+
+        rr = _make_retrieval_result(
+            [
+                _make_retrieved_chunk(
+                    selected_text="Plain text chunk with no images.",
+                    has_image=False,
+                    image_context_text=None,
+                    images=[],
+                )
+            ],
+            mode="chunk",
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def _fake_retrieve(*args, **kwargs):
+            return rr
+
+        async def _fake_rerank(query, passages, **kwargs):
+            captured["passages"] = list(passages)
+            return [RerankResult(index=0, relevance_score=0.7)]
+
+        with _override_settings(
+            reranker_provider="none",
+            reranker_top_n=10,
+            reranker_similarity_floor=0.0,
+        ):
+            with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
+                with patch.object(engine, "_release_connection", new_callable=AsyncMock):
+                    with patch("src.orchestration.engine.retrieve", AsyncMock(side_effect=_fake_retrieve)):
+                        with patch("src.orchestration.engine.rerank", AsyncMock(side_effect=_fake_rerank)):
+                            with patch(
+                                "src.orchestration.engine.merge_subquery_results",
+                                AsyncMock(return_value=[]),
+                            ):
+                                await engine._retrieve_and_rerank(["test subquery"], state)
+
+        assert "passages" in captured
+        assert len(captured["passages"]) == 1
+        assert captured["passages"][0] == "Plain text chunk with no images."
+        assert "[Image context]" not in captured["passages"][0]
 
 
 class TestEngineOneExpansion:

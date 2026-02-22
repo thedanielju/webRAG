@@ -161,6 +161,29 @@ class TestRetrievalIntegration:
         assert any(chunk.surface == "html" for chunk in flagged)
 
     @pytest.mark.asyncio(loop_scope="session")
+    async def test_retrieval_returns_image_metadata_on_chunks(self, async_db_conn, indexed_corpus):
+        # Scope to the unrelated Wikipedia page to maximize chance of image-bearing
+        # parent chunks and force full-context mode so all parent chunks are returned.
+        unrelated_source = indexed_corpus["source_urls"][2]
+        with _override_settings(
+            retrieval_full_context_threshold=10_000_000,
+            retrieval_context_budget=10_000_000,
+        ):
+            result = await retrieve(
+                async_db_conn,
+                "mount everest overview",
+                source_urls=[unrelated_source],
+            )
+
+        assert len(result.chunks) > 0
+        image_chunks = [chunk for chunk in result.chunks if chunk.has_image]
+        assert len(image_chunks) > 0, "Expected at least one returned chunk with images."
+        assert any(len(chunk.images) > 0 for chunk in image_chunks)
+        for chunk in image_chunks:
+            for image in chunk.images:
+                assert isinstance(image.url, str) and image.url
+
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_chunk_mode_semantic_match(self, async_db_conn, indexed_corpus):
         scikit_source = indexed_corpus["source_urls"][0]
         with _override_settings(

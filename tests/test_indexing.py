@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import hashlib
+import json
 import os
 import time
 from typing import Any
@@ -288,6 +289,31 @@ class TestIndexingIntegration:
 
         assert flagged_parent_count > 0
         assert flagged_missing_html == 0
+
+    def test_parent_image_metadata_persisted(self, db_conn, indexed_corpus):
+        unrelated_source = indexed_corpus["source_urls"][2]
+        with db_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT has_image, image_refs_json
+                FROM chunks
+                WHERE source_url = %s
+                  AND chunk_level = 'parent'
+                  AND has_image = TRUE
+                """,
+                (unrelated_source,),
+            )
+            rows = cur.fetchall()
+
+        assert len(rows) > 0, "Expected at least one parent chunk with image metadata."
+        for has_image, image_refs_json in rows:
+            assert has_image is True
+            assert image_refs_json is not None
+            parsed = json.loads(image_refs_json)
+            assert isinstance(parsed, list)
+            assert len(parsed) > 0
+            assert all(isinstance(item, dict) for item in parsed)
+            assert all(isinstance(item.get("url"), str) and item["url"] for item in parsed)
 
     def test_depth_persisted_correctly(self, db_conn, indexed_corpus):
         scikit_source, factual_source, unrelated_source = indexed_corpus["source_urls"]

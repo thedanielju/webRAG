@@ -184,5 +184,28 @@ class Settings(BaseSettings):
         default=0.3, validation_alias="MIN_SCORE_FOR_EXPANSION"
     )
 
+    # ── MCP Server ────────────────────────────────────────────
+    mcp_transport: str = Field(
+        default="stdio", validation_alias="MCP_TRANSPORT"
+    )
+    mcp_host: str = Field(
+        default="0.0.0.0", validation_alias="MCP_HOST"
+    )
+    mcp_port: int = Field(
+        default=8765, validation_alias="MCP_PORT"
+    )
+    mcp_auth_token: str | None = Field(
+        default=None, validation_alias="MCP_AUTH_TOKEN"
+    )
+    mcp_response_token_budget: int = Field(
+        default=30000, validation_alias="MCP_RESPONSE_TOKEN_BUDGET"
+    )
+    mcp_tool_timeout: int = Field(
+        default=120, validation_alias="MCP_TOOL_TIMEOUT"
+    )
+    mcp_log_level: str = Field(
+        default="INFO", validation_alias="MCP_LOG_LEVEL"
+    )
+
 
 settings = Settings()
