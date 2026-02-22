@@ -5,6 +5,11 @@ model (Claude, GPT, etc.) can read.  The text explicitly instructs
 the model NOT to hallucinate an answer — it should report the error
 to the user instead.
 
+Error responses are raised as ``ToolError`` (from FastMCP) so the
+MCP protocol marks them with ``is_error=True``.  This tells the
+reasoning model the tool call failed, preventing it from treating
+the error text as valid evidence.
+
 Design rationale:
   MCP tools return plain text, not exceptions.  The reasoning model
   treats the tool output as context for its response.  If we returned
@@ -17,14 +22,19 @@ Design rationale:
 
 from __future__ import annotations
 
+from typing import NoReturn
 
-def full_failure(exc: BaseException) -> str:
+from mcp.server.fastmcp.exceptions import ToolError
+
+
+def full_failure(exc: BaseException) -> NoReturn:
     """Format a complete orchestration failure.
 
     Includes the exception class and message so the model can relay
     specifics to the user (e.g. "ConnectionRefusedError: ...").
+    Raises ``ToolError`` so the MCP response has ``is_error=True``.
     """
-    return (
+    raise ToolError(
         "[ERROR]\n"
         "WebRAG encountered an error during retrieval.\n"
         "\n"
@@ -43,13 +53,14 @@ def full_failure(exc: BaseException) -> str:
     )
 
 
-def timeout(seconds: int | float) -> str:
+def timeout(seconds: int | float) -> NoReturn:
     """Format a timeout error.
 
     Suggests concrete remedies (skip expansion, use a narrower URL)
     so the model can offer the user a path forward.
+    Raises ``ToolError`` so the MCP response has ``is_error=True``.
     """
-    return (
+    raise ToolError(
         "[ERROR]\n"
         f"WebRAG timed out after {int(seconds)}s.\n"
         "\n"

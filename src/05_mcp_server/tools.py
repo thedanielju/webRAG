@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 
 from mcp.server.fastmcp import Context
 from pgvector.psycopg import register_vector_async
@@ -79,7 +80,7 @@ async def answer(
     # Normalise url to a list.
     urls: list[str] = [url] if isinstance(url, str) else list(url)
     if not urls:
-        return errors.full_failure(ValueError("At least one URL is required."))
+        errors.full_failure(ValueError("At least one URL is required."))
 
     primary_url = urls[0]
 
@@ -126,10 +127,10 @@ async def answer(
 
     except asyncio.TimeoutError:
         logger.error("answer tool timed out after %ds", settings.mcp_tool_timeout)
-        return errors.timeout(settings.mcp_tool_timeout)
+        errors.timeout(settings.mcp_tool_timeout)
     except Exception as exc:
         logger.error("answer tool failed: %r", exc, exc_info=True)
-        return errors.full_failure(exc)
+        errors.full_failure(exc)
 
     # ── Empty results ─────────────────────────────────────
     if not result.chunks:
@@ -198,6 +199,7 @@ async def search(
             passages = [c.selected_text for c in rr.chunks[:effective_top_k]]
             original_scores = [c.score for c in rr.chunks[:effective_top_k]]
 
+            rerank_t0 = time.perf_counter()
             rerank_results = await rerank(
                 query,
                 passages,
@@ -205,6 +207,7 @@ async def search(
                 top_n=effective_top_k,
                 original_scores=original_scores,
             )
+            rerank_ms = (time.perf_counter() - rerank_t0) * 1000
 
             # Map back to RankedChunk.
             ranked: list[RankedChunk] = []
@@ -232,7 +235,7 @@ async def search(
 
     except Exception as exc:
         logger.error("search tool failed: %r", exc, exc_info=True)
-        return errors.full_failure(exc)
+        errors.full_failure(exc)
 
     # ── Build OrchestrationResult-like output ─────────────
     from src.orchestration.models import (
@@ -256,8 +259,8 @@ async def search(
         corpus_stats=rr.corpus_stats,
         timing=OrchestrationTiming(
             retrieval_ms=rr.timing.search_ms,
-            reranking_ms=0.0,
-            total_ms=rr.timing.total_ms,
+            reranking_ms=rerank_ms,
+            total_ms=rr.timing.total_ms + rerank_ms,
         ),
         mode=rr.mode,
         final_decision=ExpansionDecision(
@@ -298,7 +301,7 @@ async def status(
             await engine._release_connection(conn)
     except Exception as exc:
         logger.error("status tool failed: %r", exc, exc_info=True)
-        return errors.full_failure(exc)
+        errors.full_failure(exc)
 
 
 async def _query_corpus_status(
@@ -323,7 +326,7 @@ async def _query_corpus_status(
                 """
                 SELECT d.title,
                        COUNT(c.id)    AS chunk_count,
-                       COALESCE(SUM(c.token_count), 0) AS total_tokens,
+                       COALESCE(SUM(c.token_end - c.token_start), 0) AS total_tokens,
                        d.fetched_at
                 FROM documents d
                 LEFT JOIN chunks c ON d.id = c.document_id
@@ -351,7 +354,7 @@ async def _query_corpus_status(
             """
             SELECT COUNT(DISTINCT d.id),
                    COUNT(c.id),
-                   COALESCE(SUM(c.token_count), 0)
+                   COALESCE(SUM(c.token_end - c.token_start), 0)
             FROM documents d
             LEFT JOIN chunks c ON d.id = c.document_id
             """
@@ -371,7 +374,7 @@ async def _query_corpus_status(
                 SELECT d.source_url,
                        d.title,
                        COUNT(c.id)    AS chunk_count,
-                       COALESCE(SUM(c.token_count), 0) AS total_tokens,
+                       COALESCE(SUM(c.token_end - c.token_start), 0) AS total_tokens,
                        d.fetched_at
                 FROM documents d
                 LEFT JOIN chunks c ON d.id = c.document_id

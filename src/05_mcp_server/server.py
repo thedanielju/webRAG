@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import secrets
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -142,9 +143,14 @@ def _configure_logging() -> None:
     Any stray print() or stdout log would corrupt the protocol and
     crash the client connection.  This function ensures every logger
     in the process writes to stderr instead.
+
+    The guard prevents duplicate handlers when ``main()`` is called
+    more than once (e.g. in tests or interactive sessions).
     """
     root = logging.getLogger()
     root.setLevel(settings.mcp_log_level.upper())
+    if root.handlers:
+        return  # Already configured — avoid duplicate output.
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(
         logging.Formatter(
@@ -153,6 +159,34 @@ def _configure_logging() -> None:
         )
     )
     root.addHandler(handler)
+
+
+def _make_auth_middleware(token: str):
+    """Build Starlette ASGI middleware that enforces Bearer token auth.
+
+    Returns a middleware class (not an instance) suitable for passing
+    to ``Starlette(middleware=...)``.  Requests without a valid
+    ``Authorization: Bearer <token>`` header receive a 401 response.
+
+    The comparison uses ``secrets.compare_digest`` to prevent
+    timing-based side-channel attacks on the token value.
+    """
+    from starlette.middleware import Middleware
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    class BearerAuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            auth_header = request.headers.get("authorization", "")
+            if not auth_header.startswith("Bearer "):
+                return Response("Unauthorized", status_code=401)
+            provided = auth_header[7:]  # Strip "Bearer " prefix.
+            if not secrets.compare_digest(provided, token):
+                return Response("Unauthorized", status_code=401)
+            return await call_next(request)
+
+    return Middleware(BearerAuthMiddleware)
 
 
 def main() -> None:
@@ -171,10 +205,37 @@ def main() -> None:
     mcp = create_server()
 
     logger.info("Starting WebRAG MCP server (transport=%s)", transport)
-    if transport == "streamable-http":
-        logger.info("Listening on %s:%d", settings.mcp_host, settings.mcp_port)
 
-    mcp.run(transport=transport)  # type: ignore[arg-type]
+    if transport == "streamable-http" and settings.mcp_auth_token:
+        # Wrap the Starlette app with bearer-token auth middleware,
+        # then run with uvicorn directly instead of mcp.run().
+        import uvicorn
+        from starlette.applications import Starlette
+        from starlette.routing import Mount
+
+        inner_app = mcp.streamable_http_app()
+        app = Starlette(
+            routes=[Mount("/", app=inner_app)],
+            middleware=[_make_auth_middleware(settings.mcp_auth_token)],
+        )
+
+        logger.info(
+            "Auth enabled — listening on %s:%d",
+            settings.mcp_host, settings.mcp_port,
+        )
+        uvicorn.run(
+            app,
+            host=settings.mcp_host,
+            port=settings.mcp_port,
+            log_level=settings.mcp_log_level.lower(),
+        )
+    else:
+        if transport == "streamable-http":
+            logger.info(
+                "Listening on %s:%d (no auth — MCP_AUTH_TOKEN not set)",
+                settings.mcp_host, settings.mcp_port,
+            )
+        mcp.run(transport=transport)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

@@ -285,7 +285,50 @@ class TestExpansionTrace:
         trace = _build_expansion_trace([step])
         assert "[EXPANSION TRACE]" in trace
         assert "+10 chunks" in trace
-        assert "1200ms" in trace
+        assert "(seed)" in trace  # Root is labelled as seed.
+        assert "depth 1" in trace
+
+    def test_tree_structure_uses_box_drawing(self):
+        step = ExpansionStep(
+            iteration=1,
+            depth=1,
+            source_url="https://example.com/a",
+            candidates_scored=3,
+            candidates_expanded=[
+                "https://example.com/b",
+                "https://example.com/c",
+            ],
+            candidates_failed=[],
+            chunks_added=5,
+            top_score_before=0.5,
+            top_score_after=0.7,
+            decision="stop",
+            reason="done",
+            duration_ms=100.0,
+        )
+        trace = _build_expansion_trace([step])
+        assert "├── " in trace or "└── " in trace
+
+    def test_no_per_node_timing(self):
+        """Timing and scores should NOT appear per-node (they belong in STATS)."""
+        step = ExpansionStep(
+            iteration=1,
+            depth=1,
+            source_url="https://example.com/a",
+            candidates_scored=5,
+            candidates_expanded=["https://example.com/b"],
+            candidates_failed=[],
+            chunks_added=10,
+            top_score_before=0.60,
+            top_score_after=0.72,
+            decision="stop",
+            reason="score plateau",
+            duration_ms=1200.0,
+        )
+        trace = _build_expansion_trace([step])
+        assert "1200ms" not in trace
+        assert "score:" not in trace
+        assert "0.60" not in trace
 
     def test_failed_url(self):
         step = ExpansionStep(
@@ -303,7 +346,43 @@ class TestExpansionTrace:
             duration_ms=500.0,
         )
         trace = _build_expansion_trace([step])
-        assert "[failed]" in trace
+        assert "failed" in trace
+
+    def test_stop_reason_annotated(self):
+        step = ExpansionStep(
+            iteration=1,
+            depth=1,
+            source_url="https://example.com/a",
+            candidates_scored=3,
+            candidates_expanded=["https://example.com/b"],
+            candidates_failed=[],
+            chunks_added=5,
+            top_score_before=0.5,
+            top_score_after=0.7,
+            decision="stop",
+            reason="score plateau",
+            duration_ms=100.0,
+        )
+        trace = _build_expansion_trace([step])
+        assert "stopped: score plateau" in trace
+
+    def test_common_prefix_base_line(self):
+        step = ExpansionStep(
+            iteration=1,
+            depth=1,
+            source_url="https://docs.example.com/en/stable/intro",
+            candidates_scored=3,
+            candidates_expanded=["https://docs.example.com/en/stable/api"],
+            candidates_failed=[],
+            chunks_added=5,
+            top_score_before=0.5,
+            top_score_after=0.7,
+            decision="stop",
+            reason="done",
+            duration_ms=100.0,
+        )
+        trace = _build_expansion_trace([step])
+        assert "Base:" in trace
 
     def test_empty_steps(self):
         trace = _build_expansion_trace([])

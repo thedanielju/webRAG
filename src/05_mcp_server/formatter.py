@@ -297,29 +297,26 @@ def _build_images(
 
 
 def _build_expansion_trace(steps: list[ExpansionStep]) -> str:
-    """Build [EXPANSION TRACE] as an ASCII tree diagram.
+    """Build [EXPANSION TRACE] as a parent→child ASCII tree.
 
-    Reconstructs a tree from the flat ``ExpansionStep`` list using
-    depth values.  URLs sharing a common prefix are truncated for
-    readability (e.g. ``https://docs.example.com/en/stable/`` becomes
-    the base, and children show ``/api/views`` etc.).
+    Reconstructs a tree from the flat ``ExpansionStep`` list:
+    each step's ``source_url`` is the parent, and its
+    ``candidates_expanded`` / ``candidates_failed`` are children.
+    URLs sharing a common prefix are truncated for readability.
 
-    This gives the model (and debugging humans) visibility into which
-    pages were expanded, how many chunks each added, and how scores
-    changed across iterations.
+    Per the patch spec, the trace includes depth and chunk-count
+    annotations but omits per-node timing and scores (those belong
+    in [STATS]).
     """
     if not steps:
         return ""
 
-    # Collect all URLs.
+    # ── Collect all URLs for common-prefix computation ────
     all_urls: list[str] = []
-    seed_url = steps[0].source_url
-    all_urls.append(seed_url)
     for s in steps:
-        for u in s.candidates_expanded:
-            all_urls.append(u)
-        for u in s.candidates_failed:
-            all_urls.append(u)
+        all_urls.append(s.source_url)
+        all_urls.extend(s.candidates_expanded)
+        all_urls.extend(s.candidates_failed)
 
     common_prefix = _common_url_prefix(all_urls)
 
@@ -329,38 +326,94 @@ def _build_expansion_trace(steps: list[ExpansionStep]) -> str:
             return f"/{suffix}" if not suffix.startswith("/") else suffix
         return url
 
+    # ── Build tree nodes ──────────────────────────────────
+    # Each node: (url, depth, chunks_added, status, children[])
+    # status: "ok" | "failed" | "stopped: <reason>"
+    #
+    # We walk the steps in order.  Each step produces child nodes
+    # under the source_url parent.  We track nodes by URL so deeper
+    # iterations can attach to the correct parent.
+
+    class _Node:
+        __slots__ = ("url", "depth", "chunks_added", "status", "children")
+
+        def __init__(
+            self, url: str, depth: int, chunks_added: int = 0, status: str = "ok",
+        ) -> None:
+            self.url = url
+            self.depth = depth
+            self.chunks_added = chunks_added
+            self.status = status
+            self.children: list[_Node] = []
+
+    # Map url → node for parent lookups.
+    node_map: dict[str, _Node] = {}
+    seed_url = steps[0].source_url
+    root = _Node(seed_url, depth=0)
+    node_map[seed_url] = root
+
+    for s in steps:
+        parent = node_map.get(s.source_url)
+        if parent is None:
+            # Source URL not yet in tree — add as root-level.
+            parent = _Node(s.source_url, depth=s.depth - 1)
+            root.children.append(parent)
+            node_map[s.source_url] = parent
+
+        for url in s.candidates_expanded:
+            child = _Node(url, depth=s.depth, chunks_added=s.chunks_added)
+            parent.children.append(child)
+            node_map[url] = child
+
+        for url in s.candidates_failed:
+            child = _Node(url, depth=s.depth, status="failed")
+            parent.children.append(child)
+            node_map[url] = child
+
+    # Tag the stop reason on the last step's parent node.
+    last = steps[-1]
+    last_parent = node_map.get(last.source_url)
+    if last_parent and last.reason:
+        # Attach stop annotation to the deepest expanded child,
+        # or to the parent itself if nothing was expanded.
+        target = last_parent.children[-1] if last_parent.children else last_parent
+        if target.status == "ok":
+            target.status = f"stopped: {last.reason}"
+
+    # ── Render ASCII tree ─────────────────────────────────
     lines = ["[EXPANSION TRACE]"]
     if common_prefix:
         lines.append(f"Base: {common_prefix}")
     lines.append("")
 
-    # Seed node.
-    first_score = steps[0].top_score_before if steps else 0.0
-    lines.append(
-        f"{_trunc(seed_url)} (seed, score: {first_score:.2f} → {first_score:.2f})"
-    )
+    def _render(node: _Node, prefix: str, is_last: bool, is_root: bool) -> None:
+        # Connector.
+        if is_root:
+            connector = ""
+        else:
+            connector = "└── " if is_last else "├── "
 
-    # Build tree entries from steps.
-    for s in steps:
-        indent = "│   " * (s.depth - 1) if s.depth > 1 else ""
-        connector = "├── " if s.iteration < len(steps) else "└── "
-        prefix = indent + connector
+        # Annotation.
+        parts: list[str] = []
+        if not is_root:
+            parts.append(f"depth {node.depth}")
+        if node.chunks_added > 0:
+            parts.append(f"+{node.chunks_added} chunks")
+        if node.status == "failed":
+            parts.append("failed")
+        elif node.status.startswith("stopped:"):
+            parts.append(f"[{node.status}]")
 
-        for url in s.candidates_expanded:
-            lines.append(
-                f"{prefix}{_trunc(url)} "
-                f"(depth {s.depth}, +{s.chunks_added} chunks, "
-                f"score: {s.top_score_before:.2f} → {s.top_score_after:.2f}, "
-                f"{s.duration_ms:.0f}ms)"
-            )
-        for url in s.candidates_failed:
-            lines.append(f"{prefix}{_trunc(url)} [failed]")
+        annotation = f" ({', '.join(parts)})" if parts else ""
+        label = _trunc(node.url) if not is_root else f"{_trunc(node.url)} (seed)"
+        lines.append(f"{prefix}{connector}{label}{annotation}")
 
-    # Terminal decision on last step.
-    if steps:
-        last = steps[-1]
-        lines.append(f"    [stopped: {last.reason}]")
+        # Recurse into children.
+        child_prefix = prefix + ("    " if is_last or is_root else "│   ")
+        for i, child in enumerate(node.children):
+            _render(child, child_prefix, is_last=(i == len(node.children) - 1), is_root=False)
 
+    _render(root, "", is_last=True, is_root=True)
     return "\n".join(lines)
 
 

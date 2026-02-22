@@ -2,43 +2,54 @@
 
 from __future__ import annotations
 
+import pytest
+
+from mcp.server.fastmcp.exceptions import ToolError
 from src.mcp_server.errors import empty_results, full_failure, timeout
 
 
 class TestFullFailure:
+    def test_raises_tool_error(self):
+        with pytest.raises(ToolError):
+            full_failure(RuntimeError("DB connection refused"))
+
     def test_contains_error_header(self):
-        msg = full_failure(RuntimeError("DB connection refused"))
-        assert msg.startswith("[ERROR]")
+        with pytest.raises(ToolError, match=r"\[ERROR\]"):
+            full_failure(RuntimeError("DB connection refused"))
 
     def test_contains_exception_type(self):
-        msg = full_failure(ValueError("bad url"))
-        assert "ValueError" in msg
+        with pytest.raises(ToolError, match="ValueError"):
+            full_failure(ValueError("bad url"))
 
     def test_contains_exception_message(self):
-        msg = full_failure(ConnectionError("host unreachable"))
-        assert "host unreachable" in msg
+        with pytest.raises(ToolError, match="host unreachable"):
+            full_failure(ConnectionError("host unreachable"))
 
     def test_instructs_model_not_to_hallucinate(self):
-        msg = full_failure(RuntimeError("oops"))
-        assert "Do not attempt to answer from memory" in msg
+        with pytest.raises(ToolError, match="Do not attempt to answer from memory"):
+            full_failure(RuntimeError("oops"))
 
 
 class TestTimeout:
+    def test_raises_tool_error(self):
+        with pytest.raises(ToolError):
+            timeout(120)
+
     def test_contains_seconds(self):
-        msg = timeout(120)
-        assert "120s" in msg
+        with pytest.raises(ToolError, match="120s"):
+            timeout(120)
 
     def test_contains_error_header(self):
-        msg = timeout(60)
-        assert "[ERROR]" in msg
+        with pytest.raises(ToolError, match=r"\[ERROR\]"):
+            timeout(60)
 
     def test_suggestion_present(self):
-        msg = timeout(30)
-        assert "expansion_budget=0" in msg
+        with pytest.raises(ToolError, match="expansion_budget=0"):
+            timeout(30)
 
     def test_float_truncated(self):
-        msg = timeout(120.7)
-        assert "120s" in msg
+        with pytest.raises(ToolError, match="120s"):
+            timeout(120.7)
 
 
 class TestEmptyResults:
