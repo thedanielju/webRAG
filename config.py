@@ -185,24 +185,40 @@ class Settings(BaseSettings):
     )
 
     # ── MCP Server ────────────────────────────────────────────
+    # These settings control how the MCP server communicates with
+    # reasoning models (Claude, GPT, etc.) via the Model Context Protocol.
+
+    # Transport protocol: "stdio" for desktop clients (Claude Desktop,
+    # Cursor) that launch the server as a subprocess, or "streamable-http"
+    # for remote/hosted deployments accessible over the network.
     mcp_transport: str = Field(
         default="stdio", validation_alias="MCP_TRANSPORT"
     )
+    # Network bind address for streamable-http transport (ignored for stdio).
     mcp_host: str = Field(
         default="0.0.0.0", validation_alias="MCP_HOST"
     )
+    # Port for streamable-http transport (ignored for stdio).
     mcp_port: int = Field(
         default=8765, validation_alias="MCP_PORT"
     )
+    # Optional bearer token for authenticating MCP clients (future use).
     mcp_auth_token: str | None = Field(
         default=None, validation_alias="MCP_AUTH_TOKEN"
     )
+    # Soft ceiling on response size (in tokens).  The formatter fits as
+    # many evidence chunks as possible within this budget, then truncates
+    # with a note.  Higher = more context for the model, but slower and
+    # more expensive for token-billed APIs.
     mcp_response_token_budget: int = Field(
         default=30000, validation_alias="MCP_RESPONSE_TOKEN_BUDGET"
     )
+    # Hard timeout (seconds) for the answer tool's orchestration run.
+    # Prevents runaway expansion loops from blocking the MCP connection.
     mcp_tool_timeout: int = Field(
         default=120, validation_alias="MCP_TOOL_TIMEOUT"
     )
+    # Logging verbosity for the MCP server process (DEBUG, INFO, WARNING).
     mcp_log_level: str = Field(
         default="INFO", validation_alias="MCP_LOG_LEVEL"
     )

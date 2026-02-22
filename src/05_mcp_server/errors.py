@@ -1,15 +1,29 @@
 """Error response templates for MCP tool calls.
 
 Each function returns a pre-formatted error string that the reasoning
-model can read.  The text instructs the model NOT to hallucinate —
-it should report the error to the user instead.
+model (Claude, GPT, etc.) can read.  The text explicitly instructs
+the model NOT to hallucinate an answer — it should report the error
+to the user instead.
+
+Design rationale:
+  MCP tools return plain text, not exceptions.  The reasoning model
+  treats the tool output as context for its response.  If we returned
+  a terse "500 Internal Server Error", the model might ignore it and
+  fabricate an answer from training data.  By returning a structured
+  [ERROR] block with diagnostic detail and a clear "do not answer
+  from memory" instruction, we keep the model honest and give the
+  user actionable feedback.
 """
 
 from __future__ import annotations
 
 
 def full_failure(exc: BaseException) -> str:
-    """Format a complete orchestration failure."""
+    """Format a complete orchestration failure.
+
+    Includes the exception class and message so the model can relay
+    specifics to the user (e.g. "ConnectionRefusedError: ...").
+    """
     return (
         "[ERROR]\n"
         "WebRAG encountered an error during retrieval.\n"
@@ -30,7 +44,11 @@ def full_failure(exc: BaseException) -> str:
 
 
 def timeout(seconds: int | float) -> str:
-    """Format a timeout error."""
+    """Format a timeout error.
+
+    Suggests concrete remedies (skip expansion, use a narrower URL)
+    so the model can offer the user a path forward.
+    """
     return (
         "[ERROR]\n"
         f"WebRAG timed out after {int(seconds)}s.\n"
@@ -53,7 +71,12 @@ def empty_results(
     chunks_evaluated: int,
     total_ms: float,
 ) -> str:
-    """Format a response when orchestration returns zero chunks."""
+    """Format a response when orchestration returns zero chunks.
+
+    Uses the same [SOURCES]/[EVIDENCE]/[STATS] section structure as
+    successful responses so the model's parsing logic doesn't need
+    a separate code path for "empty but not broken" results.
+    """
     return (
         "[SOURCES]\n"
         "(none)\n"

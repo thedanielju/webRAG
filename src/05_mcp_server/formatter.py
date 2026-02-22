@@ -4,6 +4,17 @@ Assembles the [SOURCES], [EVIDENCE], [IMAGES], [EXPANSION TRACE],
 [CITATIONS], and [STATS] sections that the reasoning model reads
 as a research brief.  Manages a soft token budget so the response
 stays within ``mcp_response_token_budget``.
+
+Design notes:
+  - Sections use bracketed headers ([SOURCES], [EVIDENCE], etc.) rather
+    than Markdown headings because MCP tool output is plain text, not
+    rendered Markdown.  Bracketed headers are unambiguous for LLM parsing.
+  - Token budget priority ensures essential context (sources + stats)
+    is never truncated.  Evidence fills the remaining space and is the
+    only section that can be partially included (with a truncation note).
+  - Token counting uses tiktoken's cl100k_base encoding — the same
+    tokenizer used by the embedding model — so budget estimates align
+    with the model's actual token consumption.
 """
 
 from __future__ import annotations
@@ -29,6 +40,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Lazy-initialised tokenizer (module-level singleton).
+# We avoid loading tiktoken at import time because it downloads
+# the encoding file on first use, which would slow cold starts.
 _encoder: tiktoken.Encoding | None = None
 
 
@@ -138,7 +151,12 @@ SourceMap = dict[str, int]  # source_url → 1-based reference number
 def _build_sources(
     chunks: list[RankedChunk],
 ) -> tuple[SourceMap, str]:
-    """Build [SOURCES] section and a url→number mapping."""
+    """Build [SOURCES] section and a url→number mapping.
+
+    Sources are numbered in first-seen order (matching chunk ordering)
+    so the model can reference them as [1], [2], etc.  Section headings
+    are aggregated per URL for sub-section attribution.
+    """
     # First-seen order matching chunk ordering.
     source_map: SourceMap = {}
     # url → {title, set of section headings}
@@ -181,6 +199,17 @@ def _build_evidence(
     token_budget: int,
 ) -> tuple[str, list[_ImageEntry], int]:
     """Build [EVIDENCE] section, respecting token budget.
+
+    Chunks are sorted by reranked_score (highest first) so the most
+    relevant evidence appears first.  Each chunk block includes:
+      - Source reference and relevance score
+      - Confidence score (if from a provider that returns it)
+      - Locality flag (if expanded from adjacent sibling chunks)
+      - Sub-query attribution (which decomposed query matched)
+      - Converted text content (HTML chunks go through html_converter)
+
+    If the budget is exhausted mid-way, a truncation message shows
+    how many chunks were included out of the total.
 
     Returns (section_text, extracted_images, tokens_used).
     """
@@ -271,7 +300,13 @@ def _build_expansion_trace(steps: list[ExpansionStep]) -> str:
     """Build [EXPANSION TRACE] as an ASCII tree diagram.
 
     Reconstructs a tree from the flat ``ExpansionStep`` list using
-    depth values.  URLs sharing a common prefix are truncated.
+    depth values.  URLs sharing a common prefix are truncated for
+    readability (e.g. ``https://docs.example.com/en/stable/`` becomes
+    the base, and children show ``/api/views`` etc.).
+
+    This gives the model (and debugging humans) visibility into which
+    pages were expanded, how many chunks each added, and how scores
+    changed across iterations.
     """
     if not steps:
         return ""

@@ -4,6 +4,18 @@ Creates the ``FastMCP`` instance, registers the lifespan context
 manager (engine start/stop), registers tools, and runs the server
 with the configured transport.
 
+Transport modes:
+  - ``stdio`` (default): Communicates over stdin/stdout.  Used by
+    desktop MCP clients like Claude Desktop and Cursor.  The client
+    launches this process as a subprocess.
+  - ``streamable-http``: HTTP-based transport for remote/hosted
+    deployments.  Listens on ``MCP_HOST:MCP_PORT``.
+
+Logging constraint:
+  MCP's stdio transport uses stdout for protocol messages.  ALL
+  application logging MUST go to stderr to avoid corrupting the
+  protocol stream.  ``_configure_logging()`` enforces this.
+
 Usage::
 
     python -m src.mcp_server.server                   # stdio (default)
@@ -37,9 +49,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Manage the ``OrchestratorEngine`` lifecycle.
 
-    The engine is created, started, and stored in the lifespan
-    context dict so that tool handlers can access it via
-    ``ctx.request_context.lifespan_context["engine"]``.
+    FastMCP's lifespan pattern (borrowed from Starlette/FastAPI):
+      - The context manager runs once when the server starts.
+      - The yielded dict becomes ``ctx.request_context.lifespan_context``
+        in every tool handler — this is how tools access the engine.
+      - On server shutdown, the finally block stops the engine and
+        closes the database connection pool cleanly.
     """
     engine = OrchestratorEngine()
     await engine.start()
@@ -55,7 +70,13 @@ async def lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
 
 
 def create_server() -> FastMCP:
-    """Build and configure the ``FastMCP`` instance."""
+    """Build and configure the ``FastMCP`` instance.
+
+    The ``instructions`` string is sent to the model on connection
+    and teaches it what tools are available and when to use each one.
+    Tool descriptions are intentionally verbose — they serve as the
+    model's only documentation for deciding which tool to call.
+    """
     mcp = FastMCP(
         "WebRAG",
         instructions=(
@@ -115,7 +136,13 @@ def create_server() -> FastMCP:
 
 
 def _configure_logging() -> None:
-    """Route all logging to stderr (stdout is reserved for MCP protocol)."""
+    """Route all logging to stderr.
+
+    CRITICAL: stdout is reserved for the MCP JSON-RPC protocol stream.
+    Any stray print() or stdout log would corrupt the protocol and
+    crash the client connection.  This function ensures every logger
+    in the process writes to stderr instead.
+    """
     root = logging.getLogger()
     root.setLevel(settings.mcp_log_level.upper())
     handler = logging.StreamHandler(sys.stderr)

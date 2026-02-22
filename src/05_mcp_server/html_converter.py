@@ -2,14 +2,24 @@
 
 Stateless functions that convert HTML elements into text the
 reasoning model can parse.  Called by ``formatter.py`` when
-processing chunks with ``surface == "html"``.
+processing chunks whose ``surface == "html"``.
 
-Conversion pipeline (§7.8 of the design doc):
-1. Parse with BeautifulSoup.
-2. Walk the DOM tree.
-3. Apply specific converters for recognised elements.
-4. Strip remaining tags, preserving text.
-5. Clean up whitespace.
+Why this exists:
+  Retrieval returns chunks in either markdown or HTML "surface"
+  format (chosen per-parent by the indexer based on rich-content
+  flags).  HTML is kept when the source page has tables, code blocks,
+  math, or images that markdown can't faithfully represent.  But raw
+  HTML is noisy for LLMs — tags, attributes, and entities waste
+  tokens and confuse reasoning.  This module converts the HTML into
+  clean, readable plain text while preserving semantic structure.
+
+Conversion pipeline:
+  1. Parse with BeautifulSoup + lxml.
+  2. Walk the DOM tree top-down.
+  3. Dispatch recognised elements to specialised converters
+     (table → pipe-delimited, code → fenced block, math → LaTeX, etc.).
+  4. Fall through for generic block/inline elements, preserving text.
+  5. Clean up excessive whitespace.
 """
 
 from __future__ import annotations
@@ -79,7 +89,13 @@ def _walk(
     images: list[ImageRef],
     base_url: str | None,
 ) -> str:
-    """Recursively walk the DOM, dispatching to element converters."""
+    """Recursively walk the DOM, dispatching to element converters.
+
+    The walker checks the tag name against a dispatch table of
+    specialised converters.  If no converter matches, it recurses
+    into children and wraps block-level elements in paragraph breaks
+    so the plain-text output stays readable.
+    """
     if isinstance(node, NavigableString):
         return str(node)
 
@@ -130,7 +146,11 @@ def _walk(
 
 
 def _convert_table(table: Tag) -> str:
-    """Convert ``<table>`` to a pipe-delimited text table."""
+    """Convert ``<table>`` to a pipe-delimited text table.
+
+    Produces a GitHub-flavoured Markdown table with a separator row
+    after the header.  Columns are padded to align pipes visually.
+    """
     rows: list[list[str]] = []
     for tr in table.find_all("tr"):
         cells: list[str] = []
@@ -170,7 +190,11 @@ def _convert_table(table: Tag) -> str:
 
 
 def _convert_code_block(pre: Tag) -> str:
-    """Convert ``<pre><code>`` to a fenced code block."""
+    """Convert ``<pre><code>`` to a fenced code block.
+
+    Detects the language from class attributes like
+    ``class="language-python"`` or ``class="highlight-js"``.
+    """
     code_tag = pre.find("code")
     if code_tag and isinstance(code_tag, Tag):
         lang = _detect_language(code_tag) or _detect_language(pre)
@@ -198,7 +222,16 @@ def _detect_language(tag: Tag) -> str | None:
 
 
 def _convert_math(math_tag: Tag) -> str:
-    """Convert ``<math>`` to LaTeX notation."""
+    """Convert ``<math>`` (MathML) to LaTeX notation.
+
+    Three-tier fallback strategy:
+      1. Use the ``alttext`` attribute if present — many renderers
+         (e.g. MathJax, KaTeX) embed the original LaTeX source here.
+      2. Attempt structural MathML → LaTeX conversion via
+         ``_mathml_to_latex()`` for common elements (fractions,
+         superscripts, subscripts, sqrt, matrices).
+      3. Extract plain text as a last resort.
+    """
     # Prefer alttext attribute (many renderers embed the LaTeX source).
     alttext = math_tag.get("alttext") or math_tag.get("altText")
     if alttext:
@@ -229,7 +262,20 @@ def _mathml_to_latex(node: Tag) -> str | None:
 
 
 def _mathml_node(node: Tag | NavigableString) -> str:
-    """Recursively convert a single MathML node."""
+    r"""Recursively convert a single MathML node to LaTeX.
+
+    Handles common MathML elements:
+      - ``<mfrac>``    → ``\frac{num}{den}``
+      - ``<msup>``     → ``base^{exp}``
+      - ``<msub>``     → ``base_{sub}``
+      - ``<msqrt>``    → ``\sqrt{inner}``
+      - ``<mover>``    → ``\overset{over}{base}``
+      - ``<munder>``   → ``\underset{under}{base}``
+      - ``<mtable>``   → ``\begin{matrix}...\end{matrix}``
+      - ``<mi/mn/mo>`` → literal text
+
+    Unknown tags fall through to recursive child concatenation.
+    """
     if isinstance(node, NavigableString):
         return str(node).strip()
 
@@ -304,7 +350,13 @@ def _convert_image(
     images: list[ImageRef],
     base_url: str | None,
 ) -> str:
-    """Extract image metadata and return a placeholder."""
+    """Extract image metadata and return an inline placeholder.
+
+    Images are collected into the ``images`` accumulator so the
+    formatter can build a separate [IMAGES] section.  In the text
+    flow, a brief ``[alt text]`` placeholder keeps the reading
+    position clear without wasting tokens on data URIs.
+    """
     src = img.get("src", "")
     if not src:
         return ""
@@ -331,6 +383,13 @@ def _convert_image(
     label = alt or "image"
     return f"[{label}]"
 
+
+# ── Admonition detection ──────────────────────────────────────
+#
+# Admonitions are styled callout boxes used in documentation frameworks
+# (Sphinx, MkDocs, Docusaurus, etc.).  They're rendered as <div> elements
+# with CSS classes like "admonition warning" or "note".  We detect them
+# by regex and convert to labelled text blocks with emoji prefixes.
 
 _ADMONITION_RE = re.compile(
     r"\b(admonition|warning|note|tip|caution|danger|important|hint|attention|error)\b",
@@ -364,7 +423,12 @@ def _convert_admonition(
     images: list[ImageRef],
     base_url: str | None,
 ) -> str:
-    """Convert an admonition ``<div>`` to a labelled text block."""
+    """Convert an admonition ``<div>`` to a labelled text block.
+
+    When a div has multiple classes (e.g. ``class="admonition warning"``),
+    we prefer the specific type ("warning") over the generic ("admonition")
+    to get the right emoji icon.
+    """
     classes = div.get("class", [])
     if isinstance(classes, str):
         classes = classes.split()

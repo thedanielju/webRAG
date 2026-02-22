@@ -1,9 +1,24 @@
 """MCP tool definitions — ``answer``, ``search``, ``status``.
 
+Three tools expose WebRAG's capabilities to reasoning models:
+
+  ``answer``  — Full pipeline: ingest URL(s) → decompose query → retrieve →
+                rerank → expand → format.  Slowest but most thorough.
+  ``search``  — Fast path: query the existing corpus without scraping.
+                Skips ingestion and expansion.  Useful for follow-up
+                questions about already-indexed content.
+  ``status``  — Introspection: report what's currently in the corpus
+                (document count, chunk count, token totals, URLs).
+
 Each tool function is registered on the ``FastMCP`` instance by
 :mod:`server`.  Handlers receive a ``Context`` for progress
 reporting and access the shared ``OrchestratorEngine`` via the
-lifespan state stored on ``ctx.fastmcp``.
+lifespan state dict.
+
+Error handling:
+  Every tool returns a string — never raises.  Exceptions are caught
+  and formatted via ``errors.py`` so the reasoning model always gets
+  structured feedback it can relay to the user.
 """
 
 from __future__ import annotations
@@ -70,6 +85,10 @@ async def answer(
 
     try:
         # ── Multi-URL pre-ingestion ───────────────────────
+        # When multiple URLs are provided, the first is the "primary"
+        # (drives the orchestration loop) and the rest are pre-ingested
+        # so their content is available during retrieval.  Progress
+        # notifications keep the model informed of long ingestions.
         if len(urls) > 1:
             await ctx.report_progress(0, len(urls), "Ingesting additional URLs…")
 
@@ -87,6 +106,10 @@ async def answer(
                 await ctx.report_progress(i, len(urls), f"Ingested {extra_url}")
 
         # ── Main orchestration call ───────────────────────
+        # Wrapped in asyncio.wait_for() to enforce the configurable
+        # timeout.  Without this, a deeply-expanding orchestration
+        # run on a large site could block the MCP connection
+        # indefinitely.
         await ctx.info(f"Running orchestration on {primary_url}…")
 
         result = await asyncio.wait_for(
@@ -137,10 +160,16 @@ async def search(
 ) -> str:
     """Search the existing WebRAG corpus without scraping new pages.
 
+    Bypasses the full orchestration pipeline — goes directly to
+    retrieve() + rerank() and formats the result.  This is much
+    faster than ``answer`` because it skips:
+      - URL ingestion / scraping
+      - Query decomposition
+      - Expansion loop (link scoring, crawling, re-indexing)
+
     Use this when content has already been indexed (e.g., from a
     previous ``answer`` call) and you want to ask a different question
-    about the same material.  Faster than ``answer`` because it skips
-    ingestion and expansion.
+    about the same material.
     """
     engine = _get_engine(ctx)
     effective_top_k = top_k or settings.reranker_top_n
@@ -277,7 +306,14 @@ async def _query_corpus_status(
     source_url: str | None,
     include_urls: bool,
 ) -> str:
-    """Execute status queries against documents + chunks tables."""
+    """Execute status queries against the documents + chunks tables.
+
+    Two modes:
+      - Per-URL: returns title, chunk count, token count, and fetch time
+        for a specific source URL.
+      - Corpus-wide: returns aggregate counts plus an optional listing
+        of all indexed URLs (sorted by most recently fetched first).
+    """
     lines = ["[CORPUS STATUS]"]
 
     async with conn.cursor() as cur:
