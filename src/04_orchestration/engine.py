@@ -19,7 +19,6 @@ import sys
 import time
 import warnings
 from typing import NamedTuple
-from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,6 @@ from src.orchestration.expander import expand
 from src.orchestration.locality import expand_locality
 from src.orchestration.merger import merge_ranked_chunks, merge_subquery_results
 from src.orchestration.models import (
-    ExpansionDecision,
     ExpansionStep,
     OrchestrationResult,
     OrchestrationState,
