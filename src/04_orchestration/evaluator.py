@@ -270,8 +270,21 @@ def _decide(
             confidence="medium",
         )
 
-    # 7. Mediocre plateau → EXPAND_INTENT.
+    # 7. Mediocre plateau.
+    #    With a tiny corpus (≤1 source doc), rephrasing against the
+    #    same content won't help — grow the corpus first.
     if signals.is_mediocre_plateau:
+        if signals.source_document_count <= 1:
+            return ExpansionDecision(
+                action="expand_breadth",
+                reason=(
+                    f"Mediocre plateau (mean={signals.score_mean:.3f} "
+                    f"< floor={_effective_mediocre_floor():.2f}) with only "
+                    f"{signals.source_document_count} source doc(s) — "
+                    f"expanding corpus before rephrasing."
+                ),
+                confidence="medium",
+            )
         return ExpansionDecision(
             action="expand_intent",
             reason=(
@@ -281,8 +294,22 @@ def _decide(
             confidence="medium",
         )
 
-    # 8. Low scores everywhere → EXPAND_INTENT.
+    # 8. Low scores everywhere.
+    #    If the corpus is tiny (single source document), rephrasing won't
+    #    help — expand_breadth to grow the corpus first.  Otherwise
+    #    expand_intent to try a different query decomposition.
     if signals.top_score < _effective_mediocre_floor():
+        if signals.source_document_count <= 1:
+            return ExpansionDecision(
+                action="expand_breadth",
+                reason=(
+                    f"Top score ({signals.top_score:.3f}) below mediocre floor "
+                    f"({_effective_mediocre_floor():.2f}) with only "
+                    f"{signals.source_document_count} source doc(s) — "
+                    f"expanding corpus before rephrasing."
+                ),
+                confidence="low",
+            )
         return ExpansionDecision(
             action="expand_intent",
             reason=(

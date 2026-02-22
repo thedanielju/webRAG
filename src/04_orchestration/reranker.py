@@ -61,8 +61,12 @@ async def rerank(
     effective_top_n = top_n or settings.reranker_top_n
     provider = settings.reranker_provider.lower()
 
-    logger.debug("rerank: %d passages sent to '%s' (top_n=%d)",
-                 len(passages), provider, effective_top_n)
+    payload_bytes = sum(len(p.encode("utf-8")) for p in passages)
+    logger.info(
+        "rerank: %d passages (%d bytes) sent to '%s' (top_n=%d, query=%r)",
+        len(passages), payload_bytes, provider, effective_top_n,
+        query[:80],
+    )
 
     dispatch = {
         "zeroentropy": _rerank_zeroentropy,

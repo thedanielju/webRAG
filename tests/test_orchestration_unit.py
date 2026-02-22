@@ -760,7 +760,15 @@ class TestEvaluatorExpandIntentMediocrePlateau:
         from src.orchestration.evaluator import evaluate
 
         scores = [0.38, 0.37, 0.36, 0.35, 0.35, 0.34, 0.33, 0.32, 0.31, 0.30]
-        chunks = _make_ranked_chunks_with_scores(scores)
+        # Use two distinct source URLs so source_document_count > 1 →
+        # condition #7 routes to expand_intent (not expand_breadth).
+        chunks_a = _make_ranked_chunks_with_scores(
+            scores[:5], source_url="https://example.com/page-a",
+        )
+        chunks_b = _make_ranked_chunks_with_scores(
+            scores[5:], source_url="https://example.com/page-b",
+        )
+        chunks = chunks_a + chunks_b
         qa = _make_query_analysis()
 
         with _override_settings(
@@ -787,8 +795,9 @@ class TestEvaluatorEmptyChunks:
         signals, decision = await evaluate([], 4096, 0, None, qa)
 
         assert signals.top_score == 0.0
-        # With empty chunks, top_score < mediocre_floor → expand_intent.
-        assert decision.action in ("expand_intent", "stop")
+        # With empty chunks: top_score < mediocre_floor and 0 source
+        # documents → expand_breadth (corpus too small to rephrase).
+        assert decision.action in ("expand_breadth", "stop")
 
 
 class TestEvaluatorMaxDepth:
@@ -1334,8 +1343,7 @@ class TestEngineSinglePass:
             retrieval_context_budget=4096,
             locality_expansion_enabled=False,
         ):
-            with patch.object(engine, "_pool", MagicMock()):
-                with patch.object(engine, "_acquire_connection", new_callable=AsyncMock) as mock_conn:
+            with patch.object(engine, "_acquire_connection", new_callable=AsyncMock) as mock_conn:
                     mock_conn.return_value = MagicMock()
                     with patch.object(engine, "_release_connection", new_callable=AsyncMock):
                         with patch.object(engine, "_ensure_ingested", new_callable=AsyncMock):
@@ -1441,8 +1449,7 @@ class TestEngineOneExpansion:
             locality_expansion_enabled=False,
             max_expansion_depth=5,
         ):
-            with patch.object(engine, "_pool", MagicMock()):
-                with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
+            with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
                     with patch.object(engine, "_release_connection", new_callable=AsyncMock):
                         with patch.object(engine, "_ensure_ingested", new_callable=AsyncMock):
                             with patch("src.orchestration.engine.retrieve", retrieve_mock):
@@ -1536,8 +1543,7 @@ class TestEngineExpandIntentReanalysis:
             locality_expansion_enabled=False,
             max_expansion_depth=5,
         ):
-            with patch.object(engine, "_pool", MagicMock()):
-                with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
+            with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
                     with patch.object(engine, "_release_connection", new_callable=AsyncMock):
                         with patch.object(engine, "_ensure_ingested", new_callable=AsyncMock):
                             with patch("src.orchestration.engine.retrieve", AsyncMock(side_effect=mock_retrieve)):
@@ -1623,8 +1629,7 @@ class TestEngineMaxIterationCap:
             locality_expansion_enabled=False,
             max_expansion_depth=max_depth,
         ):
-            with patch.object(engine, "_pool", MagicMock()):
-                with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
+            with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
                     with patch.object(engine, "_release_connection", new_callable=AsyncMock):
                         with patch.object(engine, "_ensure_ingested", new_callable=AsyncMock):
                             with patch("src.orchestration.engine.retrieve", AsyncMock(return_value=rr)):

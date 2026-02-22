@@ -169,7 +169,7 @@ class Settings(BaseSettings):
         default=0.03, validation_alias="DIMINISHING_RETURN_DELTA"
     )
     mediocre_score_floor: float = Field(
-        default=0.5, validation_alias="MEDIOCRE_SCORE_FLOOR"
+        default=0.25, validation_alias="MEDIOCRE_SCORE_FLOOR"
     )
     confidence_floor: float = Field(
         default=0.3, validation_alias="CONFIDENCE_FLOOR"

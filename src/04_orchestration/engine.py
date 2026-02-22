@@ -14,14 +14,16 @@ Coordinates the full retrieve-evaluate-expand loop:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import warnings
 from typing import NamedTuple
 from uuid import UUID
 
+logger = logging.getLogger(__name__)
+
 from pgvector.psycopg import register_vector_async
 from psycopg import AsyncConnection
-from psycopg_pool import AsyncConnectionPool
 
 from config import settings
 from src.indexing.indexer import index_batch
@@ -56,7 +58,7 @@ class OrchestratorEngine:
     """Coordinates the full retrieve-evaluate-expand loop.
 
     Owns:
-      - Connection pool management.
+      - Connection management.
       - Query analysis dispatch.
       - The main iteration loop.
       - Output assembly.
@@ -65,48 +67,45 @@ class OrchestratorEngine:
       - Individual evaluation logic (``evaluator.py``).
       - Reranking calls (``reranker.py``).
       - Expansion execution (``expander.py``).
+
+    Connection strategy
+    -------------------
+    Uses direct ``AsyncConnection`` instead of a pool.  The pool's
+    background workers on Windows corrupt the SelectorEventLoop's
+    fd set when they close idle connections — ``select.select()``
+    then raises ``OSError [WinError 10038]``.  Direct connections
+    avoid this entirely and are sufficient for the engine's pattern
+    of acquire-once-per-run.
     """
 
     def __init__(self) -> None:
-        self._pool: AsyncConnectionPool | None = None
+        self._started = False
 
-    # ── Pool lifecycle ────────────────────────────────────────
+    # ── Lifecycle ─────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Open the connection pool.  Must be called before ``run()``."""
-        if self._pool is not None:
-            return
-        self._pool = AsyncConnectionPool(
-            conninfo=settings.database_url,
-            min_size=2,
-            max_size=10,
-            open=False,
-            kwargs={"autocommit": True},
-        )
-        await self._pool.open()
+        """Mark engine as ready.  Must be called before ``run()``."""
+        self._started = True
 
     async def stop(self) -> None:
-        """Close the connection pool."""
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
+        """Mark engine as stopped."""
+        self._started = False
 
     async def _acquire_connection(self) -> AsyncConnection:
-        """Get a connection from the pool, registering pgvector types.
+        """Open a fresh connection with pgvector types registered.
 
         pgvector's register_vector_async must be called per-connection
         so psycopg knows how to encode/decode vector columns.
         """
-        if self._pool is None:
-            await self.start()
-        assert self._pool is not None
-        conn = await self._pool.getconn()
+        conn = await AsyncConnection.connect(
+            settings.database_url, autocommit=True,
+        )
         await register_vector_async(conn)
         return conn
 
     async def _release_connection(self, conn: AsyncConnection) -> None:
-        if self._pool is not None:
-            await self._pool.putconn(conn)
+        """Close the connection."""
+        await conn.close()
 
     # ── Main entry point ──────────────────────────────────────
 
@@ -352,19 +351,20 @@ class OrchestratorEngine:
                 row = await cur.fetchone()
                 if row and row[0]:
                     return
+
+            # Scrape and index — reuse conn to avoid second socket on
+            # Windows SelectorEventLoop (stale-fd crash).
+            try:
+                doc: NormalizedDocument = await ingest(url)
+                await index_batch([doc], [0], conn=conn)  # Seed depth = 0.
+            except Exception as exc:
+                warnings.warn(
+                    f"Failed to ingest seed URL {url}: {exc!r}",
+                    stacklevel=2,
+                )
+                raise
         finally:
             await self._release_connection(conn)
-
-        # Scrape and index.
-        try:
-            doc: NormalizedDocument = await ingest(url)
-            await index_batch([doc], [0])  # Seed depth = 0.
-        except Exception as exc:
-            warnings.warn(
-                f"Failed to ingest seed URL {url}: {exc!r}",
-                stacklevel=2,
-            )
-            raise
 
     # ── Retrieve + rerank pipeline ────────────────────────────
 
@@ -405,6 +405,8 @@ class OrchestratorEngine:
         async def _retrieve_one(sq: str) -> SubQueryResult:
             nonlocal _retrieve_ms_acc, _rerank_ms_acc
 
+            sq_t0 = time.perf_counter()
+
             ret_t0 = time.perf_counter()
             rr: RetrievalResult = await retrieve(
                 conn,
@@ -412,7 +414,8 @@ class OrchestratorEngine:
                 source_urls=source_urls,
                 context_budget_override=budget_override,
             )
-            _retrieve_ms_acc += (time.perf_counter() - ret_t0) * 1000
+            ret_elapsed = (time.perf_counter() - ret_t0) * 1000
+            _retrieve_ms_acc += ret_elapsed
             state.all_retrieval_results.append(rr)
 
             # Build passage texts for reranking.
@@ -429,7 +432,16 @@ class OrchestratorEngine:
                 instruction=instruction,
                 original_scores=original_scores,
             )
-            _rerank_ms_acc += (time.perf_counter() - rer_t0) * 1000
+            rer_elapsed = (time.perf_counter() - rer_t0) * 1000
+            _rerank_ms_acc += rer_elapsed
+
+            logger.info(
+                "sub-query '%s': retrieve=%d chunks in %.0fms, "
+                "rerank=%d passages in %.0fms, total=%.0fms",
+                sq[:60], len(rr.chunks), ret_elapsed,
+                len(passages), rer_elapsed,
+                (time.perf_counter() - sq_t0) * 1000,
+            )
 
             # Map rerank results back to RankedChunk.
             ranked: list[RankedChunk] = []

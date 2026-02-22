@@ -212,7 +212,7 @@ async def expand(
     chunks_added = 0
     if docs:
         depths = [new_depth] * len(docs)
-        await index_batch(docs, depths)
+        await index_batch(docs, depths, conn=conn)
         # Lower-bound estimate: actual chunk count depends on document
         # length and chunking config, but 1 doc ≥ 1 chunk always.
         chunks_added = len(docs)

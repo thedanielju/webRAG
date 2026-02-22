@@ -317,18 +317,29 @@ async def index_document(doc: NormalizedDocument, depth: int) -> None:
     await index_batch([doc], [depth])
 
 
-async def index_batch(docs: list[NormalizedDocument], depths: list[int]) -> None:
+async def index_batch(
+    docs: list[NormalizedDocument],
+    depths: list[int],
+    *,
+    conn: AsyncConnection | None = None,
+) -> None:
     """Chunk, embed, and store a batch of NormalizedDocuments atomically.
 
     Async coroutine — callers must await.  Embedding uses asyncio.gather()
     internally for concurrent API batches.  DB writes use AsyncConnection.
+
+    If *conn* is provided the caller's connection is reused (and NOT
+    closed here).  Otherwise a fresh connection is created and closed
+    when the function finishes.
     """
     if len(docs) != len(depths):
         raise ValueError("docs and depths must have the same length.")
     if not docs:
         return
 
-    conn = await _connect_db()
+    own_conn = conn is None
+    if own_conn:
+        conn = await _connect_db()
     try:
         total_started = time.perf_counter()
         await _ensure_schema_initialized(conn)
@@ -466,4 +477,5 @@ async def index_batch(docs: list[NormalizedDocument], depths: list[int]) -> None
                 f"phase1+2_chunk_embed={phase1:.2f}s phase2_assign={phase2:.2f}s phase3_db={phase3:.2f}s total={total:.2f}s",
             )
     finally:
-        await conn.close()
+        if own_conn:
+            await conn.close()
