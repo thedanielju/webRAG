@@ -84,7 +84,10 @@ def create_server() -> FastMCP:
             "WebRAG indexes web pages and retrieves cited evidence. "
             "Use the 'answer' tool to scrape + search a URL. "
             "Use 'search' to query already-indexed content. "
-            "Use 'status' to check what's indexed."
+            "Use 'status' to check what's indexed. "
+            "Prefer fast passes first (chunked retrieval, no expansion by default). "
+            "If the tool suggests deeper linked-page expansion, ask the user before running a slower deep pass. "
+            "When citations are present, include them in your answer."
         ),
         lifespan=lifespan,
         host=settings.mcp_host,
@@ -101,7 +104,10 @@ def create_server() -> FastMCP:
             "information. WebRAG will scrape each URL if not already "
             "indexed, decompose the query, retrieve and rerank relevant "
             "chunks, optionally expand to linked pages, and return cited "
-            "evidence with source attribution. Use this when you need "
+            "evidence with source attribution. Default behavior is a fast "
+            "chunked pass without expansion; use research_mode='deep' and/or "
+            "retrieval_mode='full_context' only when the user requests a "
+            "slower, more exhaustive search. Use this when you need "
             "factual information grounded in specific web sources."
         ),
     )

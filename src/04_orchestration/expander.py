@@ -176,6 +176,17 @@ async def expand(
     )
 
     # 6. Select top candidates.
+    if scored and scored[0].score < settings.expansion_min_candidate_score:
+        return ExpansionOutcome(
+            urls_attempted=[],
+            urls_ingested=[],
+            urls_failed=[],
+            chunks_added=0,
+            candidates_scored=len(scored),
+            candidates_selected=0,
+            depth=new_depth,
+        )
+
     selected = scored[: settings.max_candidates_per_iteration]
     if not selected:
         return ExpansionOutcome(

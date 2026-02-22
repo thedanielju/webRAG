@@ -149,6 +149,11 @@ class Settings(BaseSettings):
     expansion_map_limit: int = Field(
         default=100, validation_alias="EXPANSION_MAP_LIMIT"
     )
+    # Skip expensive expansion ingestion when the best scored link candidate is
+    # weaker than this threshold. Helps avoid low-yield expansion rounds.
+    expansion_min_candidate_score: float = Field(
+        default=0.12, validation_alias="EXPANSION_MIN_CANDIDATE_SCORE"
+    )
 
     # ── Orchestration: Locality Expansion ─────────────────────────
     locality_expansion_enabled: bool = Field(
@@ -218,6 +223,29 @@ class Settings(BaseSettings):
     # more expensive for token-billed APIs.
     mcp_response_token_budget: int = Field(
         default=30000, validation_alias="MCP_RESPONSE_TOKEN_BUDGET"
+    )
+    # Default MCP behavior should favor responsiveness. "fast" uses chunked
+    # retrieval and no expansion unless the caller explicitly asks for more.
+    mcp_default_research_mode: str = Field(
+        default="fast", validation_alias="MCP_DEFAULT_RESEARCH_MODE"
+    )
+    # MCP retrieval default. "chunk" avoids giant full-context payloads and
+    # preserves room for citations/images in the formatted response.
+    mcp_default_retrieval_mode: str = Field(
+        default="chunk", validation_alias="MCP_DEFAULT_RETRIEVAL_MODE"
+    )
+    # When enabled, MCP responses append a recommendation block prompting the
+    # model to ask the user before running a slower deep-expansion pass.
+    mcp_enable_expansion_recommendations: bool = Field(
+        default=True, validation_alias="MCP_ENABLE_EXPANSION_RECOMMENDATIONS"
+    )
+    # Reserve response tokens for citations so they survive large evidence blocks.
+    mcp_citations_reserved_tokens: int = Field(
+        default=1500, validation_alias="MCP_CITATIONS_RESERVED_TOKENS"
+    )
+    # Reserve response tokens for the [IMAGES] section.
+    mcp_images_reserved_tokens: int = Field(
+        default=500, validation_alias="MCP_IMAGES_RESERVED_TOKENS"
     )
     # Hard timeout (seconds) for the answer tool's orchestration run.
     # Prevents runaway expansion loops from blocking the MCP connection.

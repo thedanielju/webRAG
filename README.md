@@ -22,7 +22,7 @@ WebRAG is a **Model Context Protocol (MCP)** server that turns web pages into se
 1. You ask your LLM a question and provide a URL
 2. The LLM calls WebRAG's `answer` tool via MCP
 3. WebRAG scrapes the page, chunks it, embeds it, and stores it in Postgres
-4. It retrieves the most relevant passages and optionally follows links to expand the corpus
+4. It retrieves the most relevant passages and can optionally follow links to expand the corpus
 5. The LLM receives cited evidence - verbatim quotes with source URLs - and reasons over it
 
 **Why not just paste the page into the chat?**
@@ -37,8 +37,8 @@ WebRAG is a **Model Context Protocol (MCP)** server that turns web pages into se
 
 | Feature | Description |
 |---------|-------------|
-| **MCP Integration** | Three tools (`answer`, `search`, `status`) exposed via the Model Context Protocol. Works with Claude Desktop, Cursor, and any MCP-compatible client. |
-| **Smart Corpus Expansion** | Automatically follows links from the seed page when initial retrieval isn't good enough. Scores candidates by URL heuristics, anchor text relevance, and title matching. |
+| **MCP Integration** | Three tools (`answer`, `search`, `status`) exposed via the Model Context Protocol. Fast defaults plus explicit deep/full-context controls. Works with Claude Desktop, Cursor, and any MCP-compatible client. |
+| **Smart Corpus Expansion** | Default MCP behavior is no expansion for speed. Deep expansion is available on demand and uses link candidate scoring (URL heuristics, title/description relevance) to avoid low-yield crawls. |
 | **Semantic Chunking** | Splits pages by heading structure into parent/child chunks. Parents provide context; children are embedded for precise ANN search. |
 | **Rich Content Handling** | Preserves tables, code blocks, math (MathML → LaTeX), and images through HTML surface detection. The formatter converts these to clean, readable text for the model. |
 | **Provider-Agnostic Reranking** | Supports ZeroEntropy, Cohere, Jina, or no reranking. Dramatically improves result quality by rescoring passages with a cross-encoder. |
@@ -142,15 +142,21 @@ python -m src.mcp_server.server --transport streamable-http
 
 ## MCP Tools
 
-### `answer` — Full research pipeline
+### `answer` - Full research pipeline
 
 Scrapes a URL (if needed), decomposes your question, retrieves and reranks evidence, optionally expands to linked pages, and returns cited results.
+
+Default MCP behavior is optimized for responsiveness:
+- chunked retrieval
+- no expansion unless explicitly requested
+- tool may return a recommendation asking the model to ask the user before a slower deep pass
 
 ```
 answer(
     url: "https://docs.python.org/3/library/asyncio.html",
     query: "How does asyncio handle cancellation?",
-    expansion_budget: 2  # optional: max expansion iterations
+    research_mode: "fast",      # optional: fast | auto | deep (default: fast)
+    retrieval_mode: "chunk"     # optional: chunk | full_context | auto (default: chunk)
 )
 ```
 
@@ -162,18 +168,23 @@ answer(
 | `intent` | `str` (optional) | Hint for the reranker (e.g. "compare", "explain", "find examples"). |
 | `known_context` | `str` (optional) | Context the model already has, to avoid redundant retrieval. |
 | `constraints` | `list[str]` (optional) | Hard constraints on what to include/exclude. |
+| `research_mode` | `str` (optional) | `fast`, `auto`, or `deep`. `fast` disables expansion by default. `deep` enables slower multi-page expansion from the start. |
+| `retrieval_mode` | `str` (optional) | `chunk`, `full_context`, or `auto`. MCP defaults to `chunk` for better speed and citation visibility. |
 | `expansion_budget` | `int` (optional) | Max expansion iterations (overrides `MAX_EXPANSION_DEPTH`). Set to 0 to skip expansion. |
 
-### `search` — Fast corpus query
+### `search` - Fast corpus query
 
 Searches already-indexed content without scraping. Use this for follow-up questions about material you've already asked about.
 
 ```
 search(
     query: "What are the best practices for task groups?",
-    source_urls: ["https://docs.python.org/3/library/asyncio.html"]
+    source_urls: ["https://docs.python.org/3/library/asyncio.html"],
+    retrieval_mode: "chunk"  # optional: chunk | full_context | auto
 )
 ```
+
+`search` also defaults to `chunk` mode so results stay compact and citations are more likely to survive the MCP response budget.
 
 ### `status` — Corpus introspection
 
@@ -261,6 +272,10 @@ Local servers aren't rate-limited, so you can safely increase `EMBEDDING_MAX_WOR
 | `MCP_HOST` | `0.0.0.0` | Bind address for HTTP transport. |
 | `MCP_PORT` | `8765` | Port for HTTP transport. |
 | `MCP_RESPONSE_TOKEN_BUDGET` | `30000` | Soft ceiling on response size. Higher = more evidence, more tokens. |
+| `MCP_DEFAULT_RESEARCH_MODE` | `fast` | Default MCP behavior. `fast` disables expansion unless explicitly requested. |
+| `MCP_DEFAULT_RETRIEVAL_MODE` | `chunk` | Default retrieval mode for MCP tools. Keeps responses smaller and improves citation visibility. |
+| `MCP_CITATIONS_RESERVED_TOKENS` | `1500` | Reserved response budget for `[CITATIONS]`. |
+| `MCP_IMAGES_RESERVED_TOKENS` | `500` | Reserved response budget for `[IMAGES]`. |
 | `MCP_TOOL_TIMEOUT` | `120` | Seconds before the `answer` tool times out. |
 | `MCP_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, or `WARNING`. |
 

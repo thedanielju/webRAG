@@ -80,13 +80,24 @@ def format_result(result: OrchestrationResult) -> str:
     stats_section = _build_stats(result)
     stats_tokens = _count_tokens(stats_section)
 
-    remaining = budget - sources_tokens - stats_tokens
+    remaining = max(0, budget - sources_tokens - stats_tokens)
+    citations_reserve = (
+        min(settings.mcp_citations_reserved_tokens, remaining)
+        if result.citations
+        else 0
+    )
+    images_reserve = (
+        min(settings.mcp_images_reserved_tokens, max(0, remaining - citations_reserve))
+        if result.chunks
+        else 0
+    )
+    evidence_budget = max(0, remaining - citations_reserve - images_reserve)
 
     # ── Build evidence (fills remaining budget) ───────────────
     evidence_section, evidence_images, evidence_tokens = _build_evidence(
-        result.chunks, source_map, remaining,
+        result.chunks, source_map, evidence_budget,
     )
-    remaining -= evidence_tokens
+    remaining = max(0, remaining - evidence_tokens)
 
     # ── Build expansion trace ─────────────────────────────────
     trace_section = ""
@@ -260,7 +271,8 @@ def _build_evidence(
             remaining_count = len(ordered) - included
             lines.append(
                 f"\n... (showing {included} of {len(ordered)} chunks "
-                f"— remaining {remaining_count} omitted due to response budget)"
+                f"— remaining {remaining_count} omitted to preserve response budget "
+                f"for citations/images/stats)"
             )
             break
 

@@ -102,6 +102,8 @@ Each layer has a numbered directory (`src/01_ingestion/` through `src/05_mcp_ser
 
 **Surface selection**: Each returned parent gets its `surface` field set to `"html"` or `"markdown"` based on rich-content flags, so downstream formatting knows how to render it.
 
+The retrieval layer supports both modes. The MCP layer now defaults to `chunk` mode for faster user-facing behavior and better citation/image visibility. Full-context remains available as an explicit caller choice.
+
 ## Layer 4: Orchestration (`src/04_orchestration/`)
 
 **Responsibilities:** Drive the retrieve-evaluate-expand loop. Decide when the corpus is "good enough" and when to grow it.
@@ -166,6 +168,13 @@ Each layer has a numbered directory (`src/01_ingestion/` through `src/05_mcp_ser
 | `search` | Query existing corpus. Skips ingestion and expansion. Direct retrieve + rerank. | Fast (sub-second) |
 | `status` | Report corpus contents: document count, tokens, URLs, timestamps. | Instant |
 
+### MCP Default Behavior
+
+- `answer` defaults to a fast pass: chunked retrieval and no expansion unless explicitly requested.
+- `answer` supports explicit overrides such as `research_mode="deep"` and `retrieval_mode="full_context"`.
+- The formatter can append a `[NEXT STEP]` recommendation so the model asks the user before running a slower deep expansion pass.
+- The orchestration engine emits richer phase and iteration progress callbacks that the MCP layer surfaces as progress notifications.
+
 ### Response Format
 
 Tool responses use bracketed section headers for unambiguous LLM parsing:
@@ -210,6 +219,8 @@ The formatter manages a soft token budget (`MCP_RESPONSE_TOKEN_BUDGET`, default 
 5. **[IMAGES]** — included if budget allows
 6. **[CITATIONS]** — included if budget allows
 
+The MCP formatter now reserves response budget for citations and images before allocating the full remainder to evidence. This preserves citation fidelity when a single source page produces very large evidence blocks.
+
 ### Transport Modes
 
 - **stdio** (default): For desktop MCP clients (Claude Desktop, Cursor). Client launches the server as a subprocess. All logging goes to stderr — stdout is reserved for the MCP JSON-RPC protocol stream.
@@ -228,10 +239,12 @@ The formatter manages a soft token budget (`MCP_RESPONSE_TOKEN_BUDGET`, default 
 
 Candidate links are scored using 5 weighted signals:
 - URL path heuristics (documentation patterns, API references)
-- Anchor text relevance to the query
+- Candidate title/description relevance to the query
 - Page title relevance
 - Recency (weak signal)
 - Domain allowlist constraints (when configured)
+
+Expansion also applies a minimum scored-candidate threshold before expensive scrape/index work begins. This avoids low-yield expansion rounds by default.
 
 ### Termination
 

@@ -27,6 +27,7 @@ import asyncio
 import logging
 import sys
 import time
+from typing import Any, Literal
 
 from mcp.server.fastmcp import Context
 from pgvector.psycopg import register_vector_async
@@ -55,6 +56,126 @@ def _get_engine(ctx: Context) -> OrchestratorEngine:
     return ctx.request_context.lifespan_context["engine"]
 
 
+def _normalize_research_mode(
+    mode: str | None,
+) -> Literal["fast", "auto", "deep"]:
+    value = (mode or settings.mcp_default_research_mode or "fast").strip().lower()
+    if value in {"fast", "auto", "deep"}:
+        return value  # type: ignore[return-value]
+    return "fast"
+
+
+def _normalize_retrieval_mode(
+    mode: str | None,
+) -> Literal["chunk", "full_context", "auto"]:
+    value = (mode or settings.mcp_default_retrieval_mode or "chunk").strip().lower()
+    if value in {"chunk", "full_context", "auto"}:
+        return value  # type: ignore[return-value]
+    return "chunk"
+
+
+def _resolve_answer_modes(
+    *,
+    research_mode: str | None,
+    retrieval_mode: str | None,
+    expansion_budget: int | None,
+) -> tuple[Literal["fast", "auto", "deep"], Literal["chunk", "full_context", "auto"], int | None]:
+    resolved_research = _normalize_research_mode(research_mode)
+    resolved_retrieval = _normalize_retrieval_mode(retrieval_mode)
+
+    effective_expansion_budget = expansion_budget
+    if resolved_research == "fast" and expansion_budget is None:
+        effective_expansion_budget = 0
+
+    return resolved_research, resolved_retrieval, effective_expansion_budget
+
+
+async def _mcp_progress_notifier(ctx: Context, phase: str, data: dict[str, Any]) -> None:
+    """Translate engine phase callbacks into MCP progress/info notifications."""
+    if phase == "corpus_prep_start":
+        await ctx.info("Checking corpus / preparing seed URL…")
+    elif phase == "ingestion_cache_hit":
+        await ctx.info("Seed URL already indexed (cache hit).")
+    elif phase == "ingestion_start":
+        await ctx.info(f"Ingesting seed URL: {data.get('url', '')}")
+    elif phase == "ingestion_done":
+        await ctx.info("Seed ingestion complete.")
+    elif phase == "query_analysis_start":
+        await ctx.info("Analyzing query…")
+    elif phase == "query_analysis_done":
+        await ctx.info(
+            f"Query analysis complete ({data.get('sub_queries', 1)} sub-query(s), "
+            f"type={data.get('query_type', 'unknown')})."
+        )
+    elif phase == "initial_retrieval_start":
+        await ctx.info(
+            f"Running initial retrieval + reranking (mode={data.get('retrieval_mode', 'auto')})…"
+        )
+    elif phase == "initial_retrieval_done":
+        await ctx.info(
+            f"Initial retrieval complete ({data.get('chunks', 0)} chunks; "
+            f"retrieval {float(data.get('retrieval_ms', 0.0)):.0f}ms, "
+            f"rerank {float(data.get('reranking_ms', 0.0)):.0f}ms)."
+        )
+    elif phase == "evaluation_done":
+        await ctx.info(
+            f"Evaluator decision: {data.get('action', 'unknown')} "
+            f"({data.get('reason', 'no reason')})"
+        )
+    elif phase == "expansion_skipped":
+        await ctx.info(
+            f"Expansion skipped (max_iterations={data.get('max_iterations', 0)}; "
+            f"reason={data.get('reason', 'n/a')})."
+        )
+    elif phase == "expansion_iteration_start":
+        await ctx.info(
+            f"Expansion iteration {data.get('iteration', '?')} starting "
+            f"({data.get('action', 'expand')})…"
+        )
+    elif phase == "expansion_iteration_done":
+        await ctx.info(
+            f"Expansion iteration {data.get('iteration', '?')} done: "
+            f"selected={data.get('candidates_selected', 0)}, "
+            f"chunks_added={data.get('chunks_added', 0)}, "
+            f"score→{float(data.get('top_score_after', 0.0)):.2f}, "
+            f"{float(data.get('duration_ms', 0.0)):.0f}ms."
+        )
+    elif phase == "locality_start":
+        await ctx.info("Applying locality expansion…")
+    elif phase == "merge_start":
+        await ctx.info("Merging and deduplicating evidence…")
+    elif phase == "citations_start":
+        await ctx.info("Extracting citations…")
+    elif phase == "run_done":
+        await ctx.info(
+            f"Orchestration complete ({float(data.get('total_ms', 0.0)):.0f}ms total)."
+        )
+
+
+def _append_next_step_recommendation(
+    response_text: str,
+    *,
+    result: Any,
+    research_mode: Literal["fast", "auto", "deep"],
+    retrieval_mode: Literal["chunk", "full_context", "auto"],
+) -> str:
+    if not settings.mcp_enable_expansion_recommendations:
+        return response_text
+    if research_mode != "fast":
+        return response_text
+    if getattr(result, "expansion_steps", None):
+        return response_text
+
+    note = (
+        "[NEXT STEP]\n"
+        "This was a fast pass (chunked retrieval, no expansion by default). "
+        "If the user wants broader multi-page coverage, ask before proceeding with a slower deep pass.\n"
+        "- Suggested deep follow-up: research_mode=\"deep\", expansion_budget=3\n"
+        "- Suggested exhaustive single-source follow-up: retrieval_mode=\"full_context\""
+    )
+    return f"{response_text}\n\n{note}"
+
+
 # ── answer ────────────────────────────────────────────────────
 
 
@@ -66,6 +187,8 @@ async def answer(
     known_context: str | None = None,
     constraints: list[str] | None = None,
     expansion_budget: int | None = None,
+    research_mode: Literal["fast", "auto", "deep"] | None = None,
+    retrieval_mode: Literal["chunk", "full_context", "auto"] | None = None,
 ) -> str:
     """Query one or more web pages and their linked content for information.
 
@@ -80,9 +203,14 @@ async def answer(
     # Normalise url to a list.
     urls: list[str] = [url] if isinstance(url, str) else list(url)
     if not urls:
-        errors.full_failure(ValueError("At least one URL is required."))
+        return errors.full_failure(ValueError("At least one URL is required."))
 
     primary_url = urls[0]
+    resolved_research_mode, resolved_retrieval_mode, effective_expansion_budget = _resolve_answer_modes(
+        research_mode=research_mode,
+        retrieval_mode=retrieval_mode,
+        expansion_budget=expansion_budget,
+    )
 
     try:
         # ── Multi-URL pre-ingestion ───────────────────────
@@ -111,7 +239,10 @@ async def answer(
         # timeout.  Without this, a deeply-expanding orchestration
         # run on a large site could block the MCP connection
         # indefinitely.
-        await ctx.info(f"Running orchestration on {primary_url}…")
+        await ctx.info(
+            f"Running orchestration on {primary_url} "
+            f"(research_mode={resolved_research_mode}, retrieval_mode={resolved_retrieval_mode})…"
+        )
 
         result = await asyncio.wait_for(
             engine.run(
@@ -120,17 +251,19 @@ async def answer(
                 intent=intent,
                 known_context=known_context,
                 constraints=constraints,
-                expansion_budget=expansion_budget,
+                expansion_budget=effective_expansion_budget,
+                retrieval_mode=resolved_retrieval_mode,
+                progress_callback=lambda phase, data: _mcp_progress_notifier(ctx, phase, data),
             ),
             timeout=settings.mcp_tool_timeout,
         )
 
     except asyncio.TimeoutError:
         logger.error("answer tool timed out after %ds", settings.mcp_tool_timeout)
-        errors.timeout(settings.mcp_tool_timeout)
+        return errors.timeout(settings.mcp_tool_timeout)
     except Exception as exc:
         logger.error("answer tool failed: %r", exc, exc_info=True)
-        errors.full_failure(exc)
+        return errors.full_failure(exc)
 
     # ── Empty results ─────────────────────────────────────
     if not result.chunks:
@@ -146,7 +279,14 @@ async def answer(
         f"Formatting {len(result.chunks)} chunks "
         f"({result.timing.total_ms:.0f}ms total)…"
     )
-    return format_result(result)
+    await ctx.info("Building final MCP response (preserving citations/images)…")
+    response_text = format_result(result)
+    return _append_next_step_recommendation(
+        response_text,
+        result=result,
+        research_mode=resolved_research_mode,
+        retrieval_mode=resolved_retrieval_mode,
+    )
 
 
 # ── search ────────────────────────────────────────────────────
@@ -158,6 +298,7 @@ async def search(
     source_urls: list[str] | None = None,
     intent: str | None = None,
     top_k: int | None = None,
+    retrieval_mode: Literal["chunk", "full_context", "auto"] | None = None,
 ) -> str:
     """Search the existing WebRAG corpus without scraping new pages.
 
@@ -174,8 +315,11 @@ async def search(
     """
     engine = _get_engine(ctx)
     effective_top_k = top_k or settings.reranker_top_n
+    resolved_retrieval_mode = _normalize_retrieval_mode(retrieval_mode)
 
-    await ctx.info(f"Searching corpus… (top_k={effective_top_k})")
+    await ctx.info(
+        f"Searching corpus… (top_k={effective_top_k}, retrieval_mode={resolved_retrieval_mode})"
+    )
 
     try:
         conn = await engine._acquire_connection()
@@ -185,6 +329,7 @@ async def search(
                 conn,
                 query,
                 source_urls=source_urls,
+                mode_override=resolved_retrieval_mode,
             )
 
             if rr.is_empty:
@@ -196,7 +341,14 @@ async def search(
                 )
 
             # ── Rerank ────────────────────────────────────
-            passages = [c.selected_text for c in rr.chunks[:effective_top_k]]
+            passages: list[str] = []
+            for c in rr.chunks[:effective_top_k]:
+                if c.has_image and c.image_context_text:
+                    passages.append(
+                        f"{c.selected_text}\n\n[Image context]\n{c.image_context_text}"
+                    )
+                else:
+                    passages.append(c.selected_text)
             original_scores = [c.score for c in rr.chunks[:effective_top_k]]
 
             rerank_t0 = time.perf_counter()
@@ -235,7 +387,7 @@ async def search(
 
     except Exception as exc:
         logger.error("search tool failed: %r", exc, exc_info=True)
-        errors.full_failure(exc)
+        return errors.full_failure(exc)
 
     # ── Build OrchestrationResult-like output ─────────────
     from src.orchestration.models import (

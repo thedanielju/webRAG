@@ -18,7 +18,8 @@ import logging
 import sys
 import time
 import warnings
-from typing import NamedTuple
+from collections.abc import Awaitable, Callable
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,21 @@ class _RetrieveRerankTiming(NamedTuple):
     """Wall-clock breakdown from a single retrieve-and-rerank cycle."""
     retrieve_ms: float
     rerank_ms: float
+
+
+ProgressCallback = Callable[[str, dict[str, Any]], Awaitable[None] | None]
+
+
+async def _emit_progress(
+    callback: ProgressCallback | None,
+    phase: str,
+    **payload: Any,
+) -> None:
+    if callback is None:
+        return
+    maybe = callback(phase, payload)
+    if asyncio.iscoroutine(maybe):
+        await maybe
 
 
 class OrchestratorEngine:
@@ -143,6 +159,8 @@ class OrchestratorEngine:
         known_context: str | None = None,
         constraints: list[str] | None = None,
         expansion_budget: int | None = None,
+        retrieval_mode: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> OrchestrationResult:
         """Execute the full orchestration pipeline for a single request."""
         total_start = time.perf_counter()
@@ -162,9 +180,16 @@ class OrchestratorEngine:
         conn = await self._acquire_connection()
         try:
             # ── Phase 1: Corpus Preparation ───────────────────
-            await self._ensure_ingested(url, state)
+            await _emit_progress(progress_callback, "corpus_prep_start", url=url)
+            await self._ensure_ingested(url, state, progress_callback=progress_callback)
+            await _emit_progress(
+                progress_callback,
+                "corpus_prep_done",
+                ingested_urls=len(state.ingested_urls),
+            )
 
             # ── Phase 2: Query Analysis ───────────────────────
+            await _emit_progress(progress_callback, "query_analysis_start", query=query)
             qa_start = time.perf_counter()
             state.query_analysis = await analyze_query(
                 query,
@@ -173,15 +198,36 @@ class OrchestratorEngine:
                 constraints=constraints,
             )
             timing.query_analysis_ms = (time.perf_counter() - qa_start) * 1000
+            await _emit_progress(
+                progress_callback,
+                "query_analysis_done",
+                sub_queries=len(state.query_analysis.sub_queries),
+                query_type=state.query_analysis.query_type,
+                ms=timing.query_analysis_ms,
+            )
 
             # ── Phase 3: Initial Retrieval + Reranking ────────
+            await _emit_progress(
+                progress_callback,
+                "initial_retrieval_start",
+                sub_queries=len(state.query_analysis.sub_queries),
+                retrieval_mode=(retrieval_mode or "auto"),
+            )
             state.current_chunks, rr_timing = await self._retrieve_and_rerank(
                 state.query_analysis.sub_queries,
                 state,
                 intent=intent,
+                retrieval_mode=retrieval_mode,
             )
             timing.retrieval_ms = rr_timing.retrieve_ms
             timing.reranking_ms = rr_timing.rerank_ms
+            await _emit_progress(
+                progress_callback,
+                "initial_retrieval_done",
+                chunks=len(state.current_chunks),
+                retrieval_ms=rr_timing.retrieve_ms,
+                reranking_ms=rr_timing.rerank_ms,
+            )
 
             signals, decision = await evaluate(
                 state.current_chunks,
@@ -191,9 +237,28 @@ class OrchestratorEngine:
                 state.query_analysis,
             )
             state.current_signals = signals
+            await _emit_progress(
+                progress_callback,
+                "evaluation_done",
+                action=decision.action,
+                reason=decision.reason,
+                top_score=signals.top_score,
+            )
 
             # ── Phase 4: Expansion Loop ───────────────────────
-            max_iterations = expansion_budget or settings.max_expansion_depth
+            max_iterations = (
+                settings.max_expansion_depth
+                if expansion_budget is None
+                else max(0, expansion_budget)
+            )
+            if decision.action == "stop" or max_iterations == 0:
+                await _emit_progress(
+                    progress_callback,
+                    "expansion_skipped",
+                    action=decision.action,
+                    reason=decision.reason,
+                    max_iterations=max_iterations,
+                )
 
             while (
                 decision.action != "stop"
@@ -204,6 +269,14 @@ class OrchestratorEngine:
                 outcome = None  # Track breadth expansion outcome.
 
                 exp_start = time.perf_counter()
+                await _emit_progress(
+                    progress_callback,
+                    "expansion_iteration_start",
+                    iteration=state.iteration,
+                    action=decision.action,
+                    reason=decision.reason,
+                    top_score_before=top_score_before,
+                )
 
                 if decision.action == "expand_breadth":
                     outcome = await expand(
@@ -222,6 +295,7 @@ class OrchestratorEngine:
                         state.query_analysis.sub_queries,
                         state,
                         intent=intent,
+                        retrieval_mode=retrieval_mode,
                     )
                     timing.retrieval_ms += rr_timing.retrieve_ms
                     timing.reranking_ms += rr_timing.rerank_ms
@@ -234,6 +308,7 @@ class OrchestratorEngine:
                         state,
                         intent=intent,
                         relaxed=True,
+                        retrieval_mode=retrieval_mode,
                     )
                     timing.retrieval_ms += rr_timing.retrieve_ms
                     timing.reranking_ms += rr_timing.rerank_ms
@@ -258,6 +333,7 @@ class OrchestratorEngine:
                         new_analysis.sub_queries,
                         state,
                         intent=intent,
+                        retrieval_mode=retrieval_mode,
                     )
                     timing.retrieval_ms += rr_timing.retrieve_ms
                     timing.reranking_ms += rr_timing.rerank_ms
@@ -274,6 +350,19 @@ class OrchestratorEngine:
                     state.query_analysis,
                 )
                 state.current_signals = signals
+                await _emit_progress(
+                    progress_callback,
+                    "expansion_iteration_done",
+                    iteration=state.iteration,
+                    depth=state.current_depth,
+                    action=decision.action,
+                    reason=decision.reason,
+                    candidates_scored=(outcome.candidates_scored if outcome else 0),
+                    candidates_selected=(outcome.candidates_selected if outcome else 0),
+                    chunks_added=(outcome.chunks_added if outcome else 0),
+                    top_score_after=signals.top_score,
+                    duration_ms=iter_duration_ms,
+                )
 
                 # Log expansion step.
                 state.expansion_steps.append(
@@ -302,6 +391,7 @@ class OrchestratorEngine:
                 )
 
             # ── Phase 5: Locality Expansion ───────────────────
+            await _emit_progress(progress_callback, "locality_start")
             loc_start = time.perf_counter()
             if settings.locality_expansion_enabled:
                 locality_chunks = await expand_locality(
@@ -312,16 +402,26 @@ class OrchestratorEngine:
                 if locality_chunks:
                     state.current_chunks.extend(locality_chunks)
             timing.locality_ms = (time.perf_counter() - loc_start) * 1000
+            await _emit_progress(progress_callback, "locality_done", ms=timing.locality_ms)
 
             # ── Phase 6: Final Merge + Citation Assembly ──────
+            await _emit_progress(progress_callback, "merge_start", input_chunks=len(state.current_chunks))
             merge_start = time.perf_counter()
             final_chunks = await merge_ranked_chunks(
                 state.current_chunks, context_budget,
             )
             timing.merge_ms = (time.perf_counter() - merge_start) * 1000
+            await _emit_progress(
+                progress_callback,
+                "merge_done",
+                output_chunks=len(final_chunks),
+                ms=timing.merge_ms,
+            )
 
             # Citations.
+            await _emit_progress(progress_callback, "citations_start", chunks=len(final_chunks))
             citations = self._extract_citations(final_chunks)
+            await _emit_progress(progress_callback, "citations_done", citations=len(citations))
 
             # Corpus stats from last retrieval.
             corpus_stats = self._aggregate_corpus_stats(
@@ -334,6 +434,7 @@ class OrchestratorEngine:
                 mode = state.all_retrieval_results[-1].mode
 
             timing.total_ms = (time.perf_counter() - total_start) * 1000
+            await _emit_progress(progress_callback, "run_done", total_ms=timing.total_ms, mode=mode)
 
             return OrchestrationResult(
                 chunks=final_chunks,
@@ -357,6 +458,8 @@ class OrchestratorEngine:
         self,
         url: str,
         state: OrchestrationState,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> None:
         """Ensure the seed URL is in the corpus (scrape + index if not)."""
         state.ingested_urls.add(url)
@@ -371,13 +474,16 @@ class OrchestratorEngine:
                 )
                 row = await cur.fetchone()
                 if row and row[0]:
+                    await _emit_progress(progress_callback, "ingestion_cache_hit", url=url)
                     return
 
             # Scrape and index — reuse conn to avoid second socket on
             # Windows SelectorEventLoop (stale-fd crash).
             try:
+                await _emit_progress(progress_callback, "ingestion_start", url=url)
                 doc: NormalizedDocument = await ingest(url)
                 await index_batch([doc], [0], conn=conn)  # Seed depth = 0.
+                await _emit_progress(progress_callback, "ingestion_done", url=url)
             except Exception as exc:
                 warnings.warn(
                     f"Failed to ingest seed URL {url}: {exc!r}",
@@ -396,6 +502,7 @@ class OrchestratorEngine:
         *,
         intent: str | None = None,
         relaxed: bool = False,
+        retrieval_mode: str | None = None,
     ) -> tuple[list[RankedChunk], _RetrieveRerankTiming]:
         """Retrieve for each sub-query, rerank, merge.
 
@@ -442,6 +549,11 @@ class OrchestratorEngine:
                     sq,
                     source_urls=source_urls,
                     context_budget_override=budget_override,
+                    mode_override=(
+                        retrieval_mode
+                        if retrieval_mode in {"chunk", "full_context"}
+                        else None
+                    ),
                 )
                 ret_elapsed = (time.perf_counter() - ret_t0) * 1000
                 _retrieve_ms_acc += ret_elapsed

@@ -22,7 +22,7 @@ Async migration:
 from collections import defaultdict
 import json
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 import warnings
 
 from psycopg import AsyncConnection
@@ -92,10 +92,9 @@ async def _determine_mode(
     conn: AsyncConnection,
     source_urls: list[str] | None = None,
     context_budget_override: int | None = None,
+    mode_override: Literal["auto", "chunk", "full_context"] | None = None,
 ) -> tuple[str, int]:
     """Determine retrieval mode from parent-token corpus size."""
-    effective_threshold = _get_effective_threshold(context_budget_override)
-
     async with conn.cursor() as cur:
         if source_urls:
             await cur.execute(
@@ -117,6 +116,12 @@ async def _determine_mode(
             )
         row = await cur.fetchone()
     total_tokens = int(row[0] if row else 0)
+    if mode_override == "chunk":
+        return "chunk", total_tokens
+    if mode_override == "full_context":
+        return "full_context", total_tokens
+
+    effective_threshold = _get_effective_threshold(context_budget_override)
     if total_tokens <= effective_threshold:
         return "full_context", total_tokens
     return "chunk", total_tokens
@@ -487,6 +492,7 @@ async def retrieve(
     *,
     source_urls: list[str] | None = None,
     context_budget_override: int | None = None,
+    mode_override: Literal["auto", "chunk", "full_context"] | None = None,
 ) -> RetrievalResult:
     """Retrieve supporting evidence chunks from the indexed corpus.
 
@@ -511,6 +517,7 @@ async def retrieve(
         conn,
         source_urls=normalized_source_urls,
         context_budget_override=context_budget_override,
+        mode_override=mode_override,
     )
 
     total_documents, total_parent_chunks = await _load_corpus_counts(conn, normalized_source_urls)
