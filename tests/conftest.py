@@ -23,6 +23,25 @@ if sys.platform == "win32":
     # Override the default event loop policy globally so that asyncio.run()
     # and pytest-asyncio both create compatible event loops.
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # Patch SelectSelector._select to tolerate stale socket fds.
+    # When psycopg closes a connection the OS fd is freed, but it may
+    # still be registered in the selector's reader/writer sets.  On
+    # shutdown, _cancel_all_tasks → select.select() hits the stale fd
+    # and raises OSError [WinError 10038].  This is harmless — suppress
+    # it so pytest-asyncio teardown completes cleanly.
+    import selectors as _selectors
+
+    _original_select = _selectors.SelectSelector._select
+
+    def _safe_select(self, r, w, _, timeout=None):  # type: ignore[override]
+        try:
+            return _original_select(self, r, w, _, timeout)
+        except OSError:
+            # Stale fd during shutdown — return empty sets.
+            return [], [], []
+
+    _selectors.SelectSelector._select = _safe_select  # type: ignore[assignment]
 def _schema_exists(conn: Any) -> bool:
     with conn.cursor() as cur:
         cur.execute(
@@ -116,4 +135,11 @@ async def async_db_conn() -> Any:
     try:
         yield conn
     finally:
-        await conn.close()
+        try:
+            await conn.close()
+        except OSError:
+            # Windows SelectorEventLoop: closing the connection may leave
+            # a stale fd in the selector's set, causing select.select() to
+            # raise OSError [WinError 10038].  Safe to ignore during
+            # teardown — the socket is already closed.
+            pass

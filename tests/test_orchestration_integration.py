@@ -81,7 +81,7 @@ def _save_result(result, *, filename_prefix: str) -> None:
         for step in result.expansion_steps:
             summary_lines.append(
                 f"  iter {step.iteration}: "
-                f"score {step.top_score_before:.3f} → {step.top_score_after:.3f}  "
+                f"score {step.top_score_before:.3f} -> {step.top_score_after:.3f}  "
                 f"| {step.decision} | {step.duration_ms:.0f} ms | "
                 f"+{step.chunks_added} chunks | {step.reason[:60]}"
             )
@@ -99,8 +99,8 @@ def _save_result(result, *, filename_prefix: str) -> None:
     txt_path = OUT_DIR / f"{filename_prefix}.txt"
     txt_path.write_text("\n".join(summary_lines), encoding="utf-8")
 
-    print(f"\n✅ JSON saved to {json_path}")
-    print(f"✅ Summary saved to {txt_path}")
+    print(f"\n[OK] JSON saved to {json_path}")
+    print(f"[OK] Summary saved to {txt_path}")
 
 
 @pytest.mark.skipif(
@@ -187,13 +187,13 @@ class TestOrchestrationEndToEnd:
 
         # ---- Score progression logged ----
         if result.expansion_steps:
-            print("\n📊 Score progression:")
+            print("\nScore progression:")
             for step in result.expansion_steps:
                 delta = step.top_score_after - step.top_score_before
                 print(
                     f"  iter {step.iteration}: "
-                    f"{step.top_score_before:.3f} → {step.top_score_after:.3f} "
-                    f"(Δ{delta:+.3f}) | {step.duration_ms:.0f} ms | "
+                    f"{step.top_score_before:.3f} -> {step.top_score_after:.3f} "
+                    f"(delta {delta:+.3f}) | {step.duration_ms:.0f} ms | "
                     f"{step.decision}"
                 )
 

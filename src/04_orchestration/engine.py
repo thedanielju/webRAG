@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 import warnings
 from typing import NamedTuple
@@ -24,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 from pgvector.psycopg import register_vector_async
 from psycopg import AsyncConnection
+
+_USE_POOL = sys.platform != "win32"
+if _USE_POOL:
+    from psycopg_pool import AsyncConnectionPool
 
 from config import settings
 from src.indexing.indexer import index_batch
@@ -70,42 +75,64 @@ class OrchestratorEngine:
 
     Connection strategy
     -------------------
-    Uses direct ``AsyncConnection`` instead of a pool.  The pool's
-    background workers on Windows corrupt the SelectorEventLoop's
-    fd set when they close idle connections — ``select.select()``
-    then raises ``OSError [WinError 10038]``.  Direct connections
-    avoid this entirely and are sufficient for the engine's pattern
-    of acquire-once-per-run.
+    On **non-Windows** platforms an ``AsyncConnectionPool`` is used for
+    efficient connection reuse (Linux epoll / macOS kqueue handle
+    pool background workers fine).
+
+    On **Windows** (SelectorEventLoop only) the pool's background
+    workers corrupt the selector's fd set when they close idle
+    connections — ``select.select()`` raises ``OSError [WinError
+    10038]``.  Direct ``AsyncConnection`` s are used instead.
     """
 
     def __init__(self) -> None:
         self._started = False
+        self._pool: AsyncConnectionPool | None = None if _USE_POOL else None
 
     # ── Lifecycle ─────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Mark engine as ready.  Must be called before ``run()``."""
+        """Initialise the connection pool (non-Windows) or simply
+        mark the engine as ready (Windows)."""
+        if _USE_POOL:
+            self._pool = AsyncConnectionPool(
+                settings.database_url,
+                min_size=1,
+                max_size=4,
+                kwargs={"autocommit": True},
+            )
+            await self._pool.open(wait=True)
         self._started = True
 
     async def stop(self) -> None:
-        """Mark engine as stopped."""
+        """Shut down the connection pool (non-Windows) or mark the
+        engine as stopped (Windows)."""
         self._started = False
+        if _USE_POOL and self._pool is not None:
+            await self._pool.close()
+            self._pool = None
 
     async def _acquire_connection(self) -> AsyncConnection:
-        """Open a fresh connection with pgvector types registered.
+        """Obtain a connection with pgvector types registered.
 
-        pgvector's register_vector_async must be called per-connection
-        so psycopg knows how to encode/decode vector columns.
+        On non-Windows the connection is borrowed from the pool;
+        on Windows a fresh direct connection is created.
         """
-        conn = await AsyncConnection.connect(
-            settings.database_url, autocommit=True,
-        )
+        if _USE_POOL and self._pool is not None:
+            conn = await self._pool.getconn()
+        else:
+            conn = await AsyncConnection.connect(
+                settings.database_url, autocommit=True,
+            )
         await register_vector_async(conn)
         return conn
 
     async def _release_connection(self, conn: AsyncConnection) -> None:
-        """Close the connection."""
-        await conn.close()
+        """Return the connection to the pool or close it."""
+        if _USE_POOL and self._pool is not None:
+            await self._pool.putconn(conn)
+        else:
+            await conn.close()
 
     # ── Main entry point ──────────────────────────────────────
 
@@ -152,7 +179,6 @@ class OrchestratorEngine:
             # ── Phase 3: Initial Retrieval + Reranking ────────
             state.current_chunks, rr_timing = await self._retrieve_and_rerank(
                 state.query_analysis.sub_queries,
-                conn,
                 state,
                 intent=intent,
             )
@@ -196,7 +222,6 @@ class OrchestratorEngine:
                     # Re-retrieve over expanded corpus.
                     state.current_chunks, rr_timing = await self._retrieve_and_rerank(
                         state.query_analysis.sub_queries,
-                        conn,
                         state,
                         intent=intent,
                     )
@@ -208,7 +233,6 @@ class OrchestratorEngine:
                     # candidates that were just outside the original cutoff.
                     state.current_chunks, rr_timing = await self._retrieve_and_rerank(
                         state.query_analysis.sub_queries,
-                        conn,
                         state,
                         intent=intent,
                         relaxed=True,
@@ -234,7 +258,6 @@ class OrchestratorEngine:
                     state.query_analysis = new_analysis
                     state.current_chunks, rr_timing = await self._retrieve_and_rerank(
                         new_analysis.sub_queries,
-                        conn,
                         state,
                         intent=intent,
                     )
@@ -371,13 +394,16 @@ class OrchestratorEngine:
     async def _retrieve_and_rerank(
         self,
         sub_queries: list[str],
-        conn: AsyncConnection,
         state: OrchestrationState,
         *,
         intent: str | None = None,
         relaxed: bool = False,
     ) -> tuple[list[RankedChunk], _RetrieveRerankTiming]:
         """Retrieve for each sub-query, rerank, merge.
+
+        Each sub-query gets its own DB connection so that parallel
+        ``asyncio.gather()`` tasks don't share a single connection
+        (which causes ``OutOfOrderTransactionNesting``).
 
         Returns the merged ranked chunks AND a timing breakdown so the
         caller can accumulate ``retrieval_ms`` and ``reranking_ms``
@@ -402,66 +428,73 @@ class OrchestratorEngine:
         _rerank_ms_acc = 0.0
 
         # Retrieve per sub-query (concurrently).
+        # Each sub-query gets its own connection to avoid
+        # OutOfOrderTransactionNesting when asyncio.gather() runs
+        # multiple retrieve() calls that open conn.transaction().
         async def _retrieve_one(sq: str) -> SubQueryResult:
             nonlocal _retrieve_ms_acc, _rerank_ms_acc
 
-            sq_t0 = time.perf_counter()
+            sq_conn = await self._acquire_connection()
+            try:
+                sq_t0 = time.perf_counter()
 
-            ret_t0 = time.perf_counter()
-            rr: RetrievalResult = await retrieve(
-                conn,
-                sq,
-                source_urls=source_urls,
-                context_budget_override=budget_override,
-            )
-            ret_elapsed = (time.perf_counter() - ret_t0) * 1000
-            _retrieve_ms_acc += ret_elapsed
-            state.all_retrieval_results.append(rr)
+                ret_t0 = time.perf_counter()
+                rr: RetrievalResult = await retrieve(
+                    sq_conn,
+                    sq,
+                    source_urls=source_urls,
+                    context_budget_override=budget_override,
+                )
+                ret_elapsed = (time.perf_counter() - ret_t0) * 1000
+                _retrieve_ms_acc += ret_elapsed
+                state.all_retrieval_results.append(rr)
 
-            # Build passage texts for reranking.
-            passages = [c.selected_text for c in rr.chunks]
-            original_scores = [c.score for c in rr.chunks]
+                # Build passage texts for reranking.
+                passages = [c.selected_text for c in rr.chunks]
+                original_scores = [c.score for c in rr.chunks]
 
-            # Build instruction for the reranker from intent.
-            instruction = intent
+                # Build instruction for the reranker from intent.
+                instruction = intent
 
-            rer_t0 = time.perf_counter()
-            rerank_results = await rerank(
-                sq,
-                passages,
-                instruction=instruction,
-                original_scores=original_scores,
-            )
-            rer_elapsed = (time.perf_counter() - rer_t0) * 1000
-            _rerank_ms_acc += rer_elapsed
+                rer_t0 = time.perf_counter()
+                rerank_results = await rerank(
+                    sq,
+                    passages,
+                    instruction=instruction,
+                    original_scores=original_scores,
+                )
+                rer_elapsed = (time.perf_counter() - rer_t0) * 1000
+                _rerank_ms_acc += rer_elapsed
 
-            logger.info(
-                "sub-query '%s': retrieve=%d chunks in %.0fms, "
-                "rerank=%d passages in %.0fms, total=%.0fms",
-                sq[:60], len(rr.chunks), ret_elapsed,
-                len(passages), rer_elapsed,
-                (time.perf_counter() - sq_t0) * 1000,
-            )
+                logger.info(
+                    "sub-query '%s': retrieve=%d chunks in %.0fms, "
+                    "rerank=%d passages in %.0fms, total=%.0fms",
+                    sq[:60], len(rr.chunks), ret_elapsed,
+                    len(passages), rer_elapsed,
+                    (time.perf_counter() - sq_t0) * 1000,
+                )
 
-            # Map rerank results back to RankedChunk.
-            ranked: list[RankedChunk] = []
-            for rr_item in rerank_results:
-                if rr_item.index < len(rr.chunks):
-                    chunk = rr.chunks[rr_item.index]
-                    ranked.append(
-                        RankedChunk(
-                            chunk=chunk,
-                            reranked_score=rr_item.relevance_score,
-                            confidence=rr_item.confidence,
-                            source_sub_query=sq,
+                # Map rerank results back to RankedChunk.
+                ranked: list[RankedChunk] = []
+                for rr_item in rerank_results:
+                    if rr_item.index < len(rr.chunks):
+                        chunk = rr.chunks[rr_item.index]
+                        ranked.append(
+                            RankedChunk(
+                                chunk=chunk,
+                                reranked_score=rr_item.relevance_score,
+                                confidence=rr_item.confidence,
+                                source_sub_query=sq,
+                            )
                         )
-                    )
 
-            return SubQueryResult(
-                sub_query=sq,
-                retrieval_result=rr,
-                reranked_chunks=ranked,
-            )
+                return SubQueryResult(
+                    sub_query=sq,
+                    retrieval_result=rr,
+                    reranked_chunks=ranked,
+                )
+            finally:
+                await self._release_connection(sq_conn)
 
         if len(sub_queries) == 1:
             results = [await _retrieve_one(sub_queries[0])]
