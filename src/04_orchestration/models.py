@@ -130,6 +130,7 @@ class ExpansionStep(BaseModel):
     top_score_after: float
     decision: str
     reason: str
+    duration_ms: float = 0.0  # Wall-clock time for this iteration.
 
 
 # ── Sub-query results ─────────────────────────────────────────────

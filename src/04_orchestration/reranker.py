@@ -13,10 +13,13 @@ Design notes:
 
 from __future__ import annotations
 
+import logging
 import warnings
 
 from config import settings
 from src.orchestration.models import RerankResult
+
+logger = logging.getLogger(__name__)
 
 
 # ── Public interface ──────────────────────────────────────────────
@@ -57,6 +60,9 @@ async def rerank(
 
     effective_top_n = top_n or settings.reranker_top_n
     provider = settings.reranker_provider.lower()
+
+    logger.debug("rerank: %d passages sent to '%s' (top_n=%d)",
+                 len(passages), provider, effective_top_n)
 
     dispatch = {
         "zeroentropy": _rerank_zeroentropy,

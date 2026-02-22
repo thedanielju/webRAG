@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import time
 import warnings
+from typing import NamedTuple
 from uuid import UUID
 
 from pgvector.psycopg import register_vector_async
@@ -43,6 +44,12 @@ from src.orchestration.reranker import rerank
 from src.retrieval.citations import CitationSpan, extract_citation
 from src.retrieval.models import CorpusStats, RetrievalResult
 from src.retrieval.search import retrieve
+
+
+class _RetrieveRerankTiming(NamedTuple):
+    """Wall-clock breakdown from a single retrieve-and-rerank cycle."""
+    retrieve_ms: float
+    rerank_ms: float
 
 
 class OrchestratorEngine:
@@ -144,14 +151,14 @@ class OrchestratorEngine:
             timing.query_analysis_ms = (time.perf_counter() - qa_start) * 1000
 
             # ── Phase 3: Initial Retrieval + Reranking ────────
-            ret_start = time.perf_counter()
-            state.current_chunks = await self._retrieve_and_rerank(
+            state.current_chunks, rr_timing = await self._retrieve_and_rerank(
                 state.query_analysis.sub_queries,
                 conn,
                 state,
                 intent=intent,
             )
-            timing.retrieval_ms = (time.perf_counter() - ret_start) * 1000
+            timing.retrieval_ms = rr_timing.retrieve_ms
+            timing.reranking_ms = rr_timing.rerank_ms
 
             signals, decision = await evaluate(
                 state.current_chunks,
@@ -188,23 +195,27 @@ class OrchestratorEngine:
                     state.current_depth = outcome.depth
 
                     # Re-retrieve over expanded corpus.
-                    state.current_chunks = await self._retrieve_and_rerank(
+                    state.current_chunks, rr_timing = await self._retrieve_and_rerank(
                         state.query_analysis.sub_queries,
                         conn,
                         state,
                         intent=intent,
                     )
+                    timing.retrieval_ms += rr_timing.retrieve_ms
+                    timing.reranking_ms += rr_timing.rerank_ms
 
                 elif decision.action == "expand_recall":
                     # Re-retrieve with a doubled token budget to surface
                     # candidates that were just outside the original cutoff.
-                    state.current_chunks = await self._retrieve_and_rerank(
+                    state.current_chunks, rr_timing = await self._retrieve_and_rerank(
                         state.query_analysis.sub_queries,
                         conn,
                         state,
                         intent=intent,
                         relaxed=True,
                     )
+                    timing.retrieval_ms += rr_timing.retrieve_ms
+                    timing.reranking_ms += rr_timing.rerank_ms
 
                 elif decision.action == "expand_intent":
                     # Query decomposition didn't work well — re-analyze
@@ -222,14 +233,17 @@ class OrchestratorEngine:
                         ),
                     )
                     state.query_analysis = new_analysis
-                    state.current_chunks = await self._retrieve_and_rerank(
+                    state.current_chunks, rr_timing = await self._retrieve_and_rerank(
                         new_analysis.sub_queries,
                         conn,
                         state,
                         intent=intent,
                     )
+                    timing.retrieval_ms += rr_timing.retrieve_ms
+                    timing.reranking_ms += rr_timing.rerank_ms
 
-                timing.expansion_ms += (time.perf_counter() - exp_start) * 1000
+                iter_duration_ms = (time.perf_counter() - exp_start) * 1000
+                timing.expansion_ms += iter_duration_ms
 
                 # Re-evaluate.
                 signals, decision = await evaluate(
@@ -263,6 +277,7 @@ class OrchestratorEngine:
                         top_score_after=signals.top_score,
                         decision=decision.action,
                         reason=decision.reason,
+                        duration_ms=iter_duration_ms,
                     )
                 )
 
@@ -361,8 +376,12 @@ class OrchestratorEngine:
         *,
         intent: str | None = None,
         relaxed: bool = False,
-    ) -> list[RankedChunk]:
+    ) -> tuple[list[RankedChunk], _RetrieveRerankTiming]:
         """Retrieve for each sub-query, rerank, merge.
+
+        Returns the merged ranked chunks AND a timing breakdown so the
+        caller can accumulate ``retrieval_ms`` and ``reranking_ms``
+        separately.
 
         When *relaxed* is True the context budget is doubled to pull
         in more candidates before reranking.
@@ -378,14 +397,22 @@ class OrchestratorEngine:
         if state.iteration == 0:
             source_urls = list(state.ingested_urls) if state.ingested_urls else None
 
+        # Accumulators for split timing.
+        _retrieve_ms_acc = 0.0
+        _rerank_ms_acc = 0.0
+
         # Retrieve per sub-query (concurrently).
         async def _retrieve_one(sq: str) -> SubQueryResult:
+            nonlocal _retrieve_ms_acc, _rerank_ms_acc
+
+            ret_t0 = time.perf_counter()
             rr: RetrievalResult = await retrieve(
                 conn,
                 sq,
                 source_urls=source_urls,
                 context_budget_override=budget_override,
             )
+            _retrieve_ms_acc += (time.perf_counter() - ret_t0) * 1000
             state.all_retrieval_results.append(rr)
 
             # Build passage texts for reranking.
@@ -395,12 +422,14 @@ class OrchestratorEngine:
             # Build instruction for the reranker from intent.
             instruction = intent
 
+            rer_t0 = time.perf_counter()
             rerank_results = await rerank(
                 sq,
                 passages,
                 instruction=instruction,
                 original_scores=original_scores,
             )
+            _rerank_ms_acc += (time.perf_counter() - rer_t0) * 1000
 
             # Map rerank results back to RankedChunk.
             ranked: list[RankedChunk] = []
@@ -432,7 +461,10 @@ class OrchestratorEngine:
         # Merge sub-query results.
         context_budget = settings.retrieval_context_budget
         merged = await merge_subquery_results(list(results), context_budget)
-        return merged
+        return merged, _RetrieveRerankTiming(
+            retrieve_ms=_retrieve_ms_acc,
+            rerank_ms=_rerank_ms_acc,
+        )
 
     # ── Citation extraction ───────────────────────────────────
 

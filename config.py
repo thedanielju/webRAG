@@ -174,6 +174,9 @@ class Settings(BaseSettings):
     confidence_floor: float = Field(
         default=0.3, validation_alias="CONFIDENCE_FLOOR"
     )
+    min_score_for_expansion: float = Field(
+        default=0.3, validation_alias="MIN_SCORE_FOR_EXPANSION"
+    )
 
 
 settings = Settings()

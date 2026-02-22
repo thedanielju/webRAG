@@ -11,8 +11,12 @@ how similar two chunks can be before one is dropped.
 
 from __future__ import annotations
 
+import logging
+
 from config import settings
 from src.orchestration.models import RankedChunk, SubQueryResult
+
+logger = logging.getLogger(__name__)
 
 # ── Public interface ──────────────────────────────────────────────
 
@@ -34,17 +38,27 @@ async def merge_subquery_results(
     if not subquery_results:
         return []
 
+    # Count total chunks entering merge across all sub-queries.
+    total_entering = sum(len(sqr.reranked_chunks) for sqr in subquery_results)
+    logger.debug("merge_subquery: %d chunks entering from %d sub-queries",
+                 total_entering, len(subquery_results))
+
     # 1–2. Union by chunk_id, keeping the highest score.
     merged = _union_by_chunk_id(subquery_results)
+    logger.debug("merge_subquery: %d chunks after dedup by chunk_id", len(merged))
 
     # 3. MMR deduplication.
     deduplicated = _mmr_dedup(merged)
+    logger.debug("merge_subquery: %d chunks after MMR dedup", len(deduplicated))
 
     # 4. Sort by score descending.
     deduplicated.sort(key=lambda r: r.reranked_score, reverse=True)
 
     # 5. Apply token budget.
-    return _apply_budget(deduplicated, context_budget)
+    result = _apply_budget(deduplicated, context_budget)
+    logger.debug("merge_subquery: %d chunks after token budget (budget=%d)",
+                 len(result), context_budget)
+    return result
 
 
 async def merge_ranked_chunks(
@@ -59,6 +73,8 @@ async def merge_ranked_chunks(
     if not chunks:
         return []
 
+    logger.debug("merge_ranked: %d chunks entering", len(chunks))
+
     # Deduplicate by chunk_id, keeping max score.
     by_id: dict[str, RankedChunk] = {}
     for c in chunks:
@@ -68,9 +84,16 @@ async def merge_ranked_chunks(
             by_id[key] = c
 
     merged = list(by_id.values())
+    logger.debug("merge_ranked: %d chunks after dedup by chunk_id", len(merged))
+
     deduplicated = _mmr_dedup(merged)
+    logger.debug("merge_ranked: %d chunks after MMR dedup", len(deduplicated))
+
     deduplicated.sort(key=lambda r: r.reranked_score, reverse=True)
-    return _apply_budget(deduplicated, context_budget)
+    result = _apply_budget(deduplicated, context_budget)
+    logger.debug("merge_ranked: %d chunks after token budget (budget=%d)",
+                 len(result), context_budget)
+    return result
 
 
 # ── Union ─────────────────────────────────────────────────────────

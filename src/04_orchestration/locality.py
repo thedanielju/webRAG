@@ -23,7 +23,7 @@ async def expand_locality(
     conn: AsyncConnection,
     *,
     radius: int | None = None,
-    min_score_for_expansion: float = 0.5,
+    min_score_for_expansion: float | None = None,
 ) -> list[RankedChunk]:
     """Fetch sibling parent chunks adjacent to high-scoring hits.
 
@@ -55,13 +55,19 @@ async def expand_locality(
     if effective_radius <= 0:
         return []
 
+    effective_min_score = (
+        min_score_for_expansion
+        if min_score_for_expansion is not None
+        else settings.min_score_for_expansion
+    )
+
     # Identify expansion targets.
     existing_chunk_ids: set[UUID] = {
         c.chunk.chunk_id for c in high_score_chunks
     }
     targets = [
         c for c in high_score_chunks
-        if c.reranked_score >= min_score_for_expansion
+        if c.reranked_score >= effective_min_score
     ]
     if not targets:
         return []
