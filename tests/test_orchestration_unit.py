@@ -449,6 +449,58 @@ class TestQueryAnalyzerFallback:
 # 1.2  Reranker Tests
 # ===================================================================
 
+
+class TestStripMarkupForReranking:
+    """Test strip_markup_for_reranking utility."""
+
+    def test_html_tags_removed(self):
+        from src.orchestration.reranker import strip_markup_for_reranking
+
+        assert strip_markup_for_reranking("<p>Hello <b>world</b></p>") == "Hello world"
+
+    def test_mathml_text_preserved(self):
+        from src.orchestration.reranker import strip_markup_for_reranking
+
+        mathml = "<math><mrow><mi>x</mi><mo>=</mo><mn>42</mn></mrow></math>"
+        result = strip_markup_for_reranking(mathml)
+        assert "x" in result
+        assert "=" in result
+        assert "42" in result
+        assert "<" not in result
+
+    def test_code_blocks_text_preserved(self):
+        from src.orchestration.reranker import strip_markup_for_reranking
+
+        html = "<pre><code>def foo():\n    return 1</code></pre>"
+        result = strip_markup_for_reranking(html)
+        assert "def foo():" in result
+        assert "return 1" in result
+
+    def test_table_text_preserved(self):
+        from src.orchestration.reranker import strip_markup_for_reranking
+
+        html = "<table><tr><td>A</td><td>B</td></tr></table>"
+        result = strip_markup_for_reranking(html)
+        assert "A" in result
+        assert "B" in result
+
+    def test_whitespace_collapsed(self):
+        from src.orchestration.reranker import strip_markup_for_reranking
+
+        assert strip_markup_for_reranking("foo   bar\n\nbaz") == "foo bar baz"
+
+    def test_empty_string(self):
+        from src.orchestration.reranker import strip_markup_for_reranking
+
+        assert strip_markup_for_reranking("") == ""
+
+    def test_plain_text_unchanged(self):
+        from src.orchestration.reranker import strip_markup_for_reranking
+
+        text = "Gradient boosting is an ensemble technique"
+        assert strip_markup_for_reranking(text) == text
+
+
 class TestRerankerPassthrough:
     """Test passthrough mode (provider='none')."""
 

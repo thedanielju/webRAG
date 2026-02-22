@@ -449,9 +449,46 @@ class OrchestratorEngine:
                 _retrieve_ms_acc += ret_elapsed
                 state.all_retrieval_results.append(rr)
 
+                # ── Pre-filter: similarity floor (Optimization 3) ──
+                # Remove near-noise chunks before reranking.
+                floor = settings.reranker_similarity_floor
+                all_chunks = rr.chunks
+                above_floor = [
+                    c for c in all_chunks
+                    if c.raw_similarity is None  # full_context mode: keep
+                    or c.raw_similarity >= floor
+                ]
+                # Guarantee at least 1 chunk survives filtering.
+                if not above_floor and all_chunks:
+                    best = max(all_chunks, key=lambda c: c.score)
+                    above_floor = [best]
+
+                if len(above_floor) < len(all_chunks):
+                    logger.debug(
+                        "similarity floor filter: %d -> %d chunks (floor=%.2f)",
+                        len(all_chunks), len(above_floor), floor,
+                    )
+
+                # ── Pre-filter: top-N by retrieval score (Opt 2) ──
+                # Sort by retrieval score descending and take only the
+                # top reranker_top_n — extra chunks won't survive
+                # reranking anyway.
+                sorted_chunks = sorted(
+                    above_floor, key=lambda c: c.score, reverse=True,
+                )
+                chunks_for_reranking = sorted_chunks[
+                    : settings.reranker_top_n
+                ]
+                if len(chunks_for_reranking) < len(above_floor):
+                    logger.debug(
+                        "rerank pre-filter: %d chunks -> %d (top_n=%d)",
+                        len(above_floor), len(chunks_for_reranking),
+                        settings.reranker_top_n,
+                    )
+
                 # Build passage texts for reranking.
-                passages = [c.selected_text for c in rr.chunks]
-                original_scores = [c.score for c in rr.chunks]
+                passages = [c.selected_text for c in chunks_for_reranking]
+                original_scores = [c.score for c in chunks_for_reranking]
 
                 # Build instruction for the reranker from intent.
                 instruction = intent
@@ -475,10 +512,12 @@ class OrchestratorEngine:
                 )
 
                 # Map rerank results back to RankedChunk.
+                # Indices refer to chunks_for_reranking (the pre-filtered
+                # list), not to the full rr.chunks.
                 ranked: list[RankedChunk] = []
                 for rr_item in rerank_results:
-                    if rr_item.index < len(rr.chunks):
-                        chunk = rr.chunks[rr_item.index]
+                    if rr_item.index < len(chunks_for_reranking):
+                        chunk = chunks_for_reranking[rr_item.index]
                         ranked.append(
                             RankedChunk(
                                 chunk=chunk,

@@ -123,6 +123,12 @@ class Settings(BaseSettings):
     reranker_top_n: int = Field(
         default=20, validation_alias="RERANKER_TOP_N"
     )
+    # Chunks with raw_similarity below this floor are excluded before
+    # reranking.  These are near-noise that passed retrieval's broader
+    # threshold but aren't worth reranker tokens.  Set to 0.0 to disable.
+    reranker_similarity_floor: float = Field(
+        default=0.15, validation_alias="RERANKER_SIMILARITY_FLOOR"
+    )
 
     # ── Orchestration: Expansion ──────────────────────────────────
     max_expansion_depth: int = Field(

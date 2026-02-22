@@ -14,10 +14,32 @@ Design notes:
 from __future__ import annotations
 
 import logging
+import re
 import warnings
 
 from config import settings
 from src.orchestration.models import RerankResult
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def strip_markup_for_reranking(text: str) -> str:
+    """Strip HTML/MathML/markup tags for reranker input.
+
+    Preserves semantic text content:
+    - HTML tags removed, text content kept
+    - MathML: <mi>x</mi> -> "x", <mo>+</mo> -> "+", <mn>42</mn> -> "42"
+    - <code> blocks: tags stripped, code text preserved
+    - <table> structures: cell text preserved, separated by spaces
+    - Consecutive whitespace collapsed to single space
+    - Result trimmed
+
+    Does NOT handle: image alt text (acceptable loss for reranking).
+    """
+    stripped = _TAG_RE.sub(" ", text)
+    stripped = _WHITESPACE_RE.sub(" ", stripped)
+    return stripped.strip()
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +83,27 @@ async def rerank(
     effective_top_n = top_n or settings.reranker_top_n
     provider = settings.reranker_provider.lower()
 
-    payload_bytes = sum(len(p.encode("utf-8")) for p in passages)
+    # ── Optimization 1: strip markup before sending to the reranker ──
+    # The reranker scores on semantic text content; HTML/MathML tags are
+    # noise that inflates payload size without improving relevance.
+    # Index mapping is unaffected because we only transform text, not
+    # reorder or filter the list.
+    original_bytes = sum(len(p.encode("utf-8")) for p in passages)
+    stripped_passages = [strip_markup_for_reranking(p) for p in passages]
+    stripped_bytes = sum(len(p.encode("utf-8")) for p in stripped_passages)
+    logger.debug(
+        "rerank: stripped %d bytes -> %d bytes (%.0f%% reduction)",
+        original_bytes, stripped_bytes,
+        (1 - stripped_bytes / max(original_bytes, 1)) * 100,
+    )
     logger.info(
         "rerank: %d passages (%d bytes) sent to '%s' (top_n=%d, query=%r)",
-        len(passages), payload_bytes, provider, effective_top_n,
+        len(stripped_passages), stripped_bytes, provider, effective_top_n,
         query[:80],
     )
+
+    # Use stripped_passages for dispatching to the reranker providers.
+    passages = stripped_passages
 
     dispatch = {
         "zeroentropy": _rerank_zeroentropy,
