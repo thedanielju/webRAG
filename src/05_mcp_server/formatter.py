@@ -59,39 +59,68 @@ def _count_tokens(text: str) -> int:
 # ── Public entry point ────────────────────────────────────────
 
 
-def format_result(result: OrchestrationResult) -> str:
+def format_result(
+    result: OrchestrationResult,
+    *,
+    research_mode: str = "fast",
+    retrieval_mode: str = "chunk",
+) -> str:
     """Format an ``OrchestrationResult`` into the full MCP response text.
 
-    Sections are assembled in budget-priority order (§6.3):
-      1. [SOURCES] — always included in full.
-      2. [STATS]   — always included in full.
-      3. [EVIDENCE] — fills remaining budget; truncated if needed.
-      4. [EXPANSION TRACE] — included if budget allows.
-      5. [IMAGES]  — included if budget allows.
-      6. [CITATIONS] — included if budget allows.
+    Sections are assembled in budget-priority order:
+
+      Guaranteed (never dropped):
+        1. [PRESENTATION GUIDE] — inline directives for the reasoning model.
+        2. [SOURCES]            — numbered source reference list.
+        3. [STATS]              — retrieval metadata and timing.
+        4. [CITATIONS]          — verbatim quotes with attribution.
+        5. [FOLLOW-UP OPTIONS]  — context-sensitive next-step suggestions.
+
+      Budget-dependent (included if space remains):
+        6. [EVIDENCE]           — fills remaining budget; truncated if needed.
+        7. [EXPANSION TRACE]    — ASCII tree of crawled pages.
+        8. [IMAGES]             — extracted image metadata.
     """
     budget = settings.mcp_response_token_budget
 
-    # ── Build source index ────────────────────────────────────
+    # ── Build guaranteed sections first ───────────────────────
+
+    # Source index.
     source_map, sources_section = _build_sources(result.chunks)
     sources_tokens = _count_tokens(sources_section)
 
-    # ── Build stats ───────────────────────────────────────────
+    # Stats.
     stats_section = _build_stats(result)
     stats_tokens = _count_tokens(stats_section)
 
-    remaining = max(0, budget - sources_tokens - stats_tokens)
-    citations_reserve = (
-        min(settings.mcp_citations_reserved_tokens, remaining)
-        if result.citations
-        else 0
+    # Citations (guaranteed — built early so they are never dropped).
+    citations_section = ""
+    citations_tokens = 0
+    if result.citations:
+        citations_section = _build_citations(result.citations, source_map)
+        citations_tokens = _count_tokens(citations_section)
+
+    # Follow-up options (guaranteed, context-sensitive).
+    follow_up_section = _build_follow_up_options(
+        result,
+        research_mode=research_mode,
+        retrieval_mode=retrieval_mode,
     )
+    follow_up_tokens = _count_tokens(follow_up_section)
+
+    # ── Compute remaining budget for variable sections ────────
+    guaranteed_overhead = (
+        sources_tokens + stats_tokens + citations_tokens + follow_up_tokens
+    )
+    remaining = max(0, budget - guaranteed_overhead)
+
+    # Images reserve (from the variable budget).
     images_reserve = (
-        min(settings.mcp_images_reserved_tokens, max(0, remaining - citations_reserve))
+        min(settings.mcp_images_reserved_tokens, remaining)
         if result.chunks
         else 0
     )
-    evidence_budget = max(0, remaining - citations_reserve - images_reserve)
+    evidence_budget = max(0, remaining - images_reserve)
 
     # ── Build evidence (fills remaining budget) ───────────────
     evidence_section, evidence_images, evidence_tokens = _build_evidence(
@@ -124,18 +153,16 @@ def format_result(result: OrchestrationResult) -> str:
         else:
             images_section = ""
 
-    # ── Build citations ───────────────────────────────────────
-    citations_section = ""
-    if result.citations and remaining > 100:
-        citations_section = _build_citations(result.citations, source_map)
-        cit_tokens = _count_tokens(citations_section)
-        if cit_tokens <= remaining:
-            remaining -= cit_tokens
-        else:
-            citations_section = ""
+    # ── Build presentation guide (needs to know which sections exist) ─
+    guide_section = _build_presentation_guide(
+        has_citations=bool(citations_section),
+        has_expansion_trace=bool(trace_section),
+        has_images=bool(images_section),
+        has_follow_up=True,
+    )
 
     # ── Assemble ──────────────────────────────────────────────
-    parts = [sources_section, evidence_section]
+    parts = [guide_section, sources_section, evidence_section]
     if images_section:
         parts.append(images_section)
     if trace_section:
@@ -143,6 +170,7 @@ def format_result(result: OrchestrationResult) -> str:
     if citations_section:
         parts.append(citations_section)
     parts.append(stats_section)
+    parts.append(follow_up_section)
 
     response = "\n\n".join(parts)
 
@@ -486,6 +514,112 @@ def _build_citations(
 
 
 # ── Stats ─────────────────────────────────────────────────────
+
+
+def _build_presentation_guide(
+    *,
+    has_citations: bool,
+    has_expansion_trace: bool,
+    has_images: bool,
+    has_follow_up: bool,
+) -> str:
+    """Build [PRESENTATION GUIDE] — inline directives for the reasoning model.
+
+    Placed at the TOP of every tool response so the model reads it
+    before processing evidence.  This is the ACI poka-yoke pattern:
+    make the correct presentation behavior the easiest path.
+
+    Content is dynamic — only references sections that actually exist
+    in the current response.
+    """
+    lines = [
+        "[PRESENTATION GUIDE]",
+        "Your response to the user MUST include:",
+        "1. A synthesized answer using the evidence below — do not dump raw sections",
+        "2. Inline citations for every claim, referencing [Source N] from the [SOURCES] list",
+    ]
+    item = 3
+    if has_citations:
+        lines.append(
+            f"{item}. Use the [CITATIONS] section below for exact quotes with attribution"
+        )
+        item += 1
+    if has_expansion_trace:
+        lines.append(
+            f"{item}. Include the expansion trace tree diagram from "
+            "[EXPANSION TRACE] so the user sees which pages were explored"
+        )
+        item += 1
+    if has_images:
+        lines.append(
+            f"{item}. Include relevant image links from the [IMAGES] section"
+        )
+        item += 1
+    if has_follow_up:
+        lines.append(
+            f"{item}. Present the follow-up options from [FOLLOW-UP OPTIONS] "
+            "at the end of your response"
+        )
+    lines.append(
+        "Do NOT omit citations or the expansion trace. "
+        "The user expects source attribution and traversal visibility."
+    )
+    return "\n".join(lines)
+
+
+def _build_follow_up_options(
+    result: OrchestrationResult,
+    *,
+    research_mode: str = "fast",
+    retrieval_mode: str = "chunk",
+) -> str:
+    """Build [FOLLOW-UP OPTIONS] — always present, context-sensitive.
+
+    Replaces the old conditional ``[NEXT STEP]`` block.  Suggests
+    relevant next actions based on the current pipeline state so the
+    reasoning model consistently offers follow-up flexibility.
+    """
+    lines = ["[FOLLOW-UP OPTIONS]"]
+
+    # Fast mode, no expansion — suggest deep recursive subtree search.
+    if research_mode == "fast" and not result.expansion_steps:
+        lines.append(
+            "- DEEP SEARCH: This was a fast single-page pass. For broader "
+            "multi-page coverage via recursive link expansion, ask the user "
+            'before running: research_mode="deep", expansion_budget=3'
+        )
+
+    # Expansion occurred but was limited.
+    if result.expansion_steps:
+        last_step = result.expansion_steps[-1]
+        reason = (last_step.reason or "").lower()
+        if "budget" in reason or "depth" in reason or "max" in reason:
+            lines.append(
+                "- CONTINUE EXPANSION: Expansion was stopped early "
+                f'({last_step.reason}). The user can request a higher '
+                "expansion_budget for deeper recursive subtree coverage."
+            )
+
+    # Chunk mode — suggest full context for thorough single-source analysis.
+    if retrieval_mode == "chunk" and result.mode == "chunk":
+        lines.append(
+            "- FULL CONTEXT: For exhaustive single-source analysis, suggest "
+            'retrieval_mode="full_context" to return the entire document.'
+        )
+
+    # Always: follow-up search on existing corpus.
+    lines.append(
+        "- FOLLOW-UP SEARCH: The indexed content is available for follow-up "
+        "questions using the 'search' tool (faster, no re-scraping needed)."
+    )
+
+    # Always: refine query.
+    lines.append(
+        "- REFINE QUERY: If results are too broad or not specific enough, "
+        "the user can ask a more targeted question about the same content."
+    )
+
+    return "\n".join(lines)
 
 
 def _build_stats(result: OrchestrationResult) -> str:

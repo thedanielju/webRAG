@@ -239,7 +239,9 @@ class Settings(BaseSettings):
     mcp_enable_expansion_recommendations: bool = Field(
         default=True, validation_alias="MCP_ENABLE_EXPANSION_RECOMMENDATIONS"
     )
-    # Reserve response tokens for citations so they survive large evidence blocks.
+    # Deprecated: citations are now a guaranteed section in the formatter
+    # (never dropped by budget).  This setting is retained for backward
+    # compatibility but no longer used for budget reservation.
     mcp_citations_reserved_tokens: int = Field(
         default=1500, validation_alias="MCP_CITATIONS_RESERVED_TOKENS"
     )

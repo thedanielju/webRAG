@@ -10,6 +10,8 @@ import pytest
 from src.mcp_server.formatter import (
     _build_citations,
     _build_expansion_trace,
+    _build_follow_up_options,
+    _build_presentation_guide,
     _build_sources,
     _build_stats,
     _common_url_prefix,
@@ -168,12 +170,31 @@ class TestBuildSources:
 
 
 class TestFormatResult:
-    def test_contains_all_sections(self):
+    def test_contains_all_guaranteed_sections(self):
         result = _make_result()
         text = format_result(result)
+        assert "[PRESENTATION GUIDE]" in text
         assert "[SOURCES]" in text
         assert "[EVIDENCE]" in text
         assert "[STATS]" in text
+        assert "[FOLLOW-UP OPTIONS]" in text
+
+    def test_presentation_guide_is_first(self):
+        result = _make_result()
+        text = format_result(result)
+        guide_pos = text.index("[PRESENTATION GUIDE]")
+        sources_pos = text.index("[SOURCES]")
+        assert guide_pos < sources_pos
+
+    def test_follow_up_options_section_after_stats(self):
+        result = _make_result()
+        text = format_result(result)
+        stats_pos = text.index("[STATS]")
+        # The follow-up section header appears both in the presentation
+        # guide (as a reference) and as the actual section.  Find the
+        # actual section — it starts on its own line after [STATS].
+        follow_up_pos = text.index("\n[FOLLOW-UP OPTIONS]")
+        assert follow_up_pos > stats_pos
 
     def test_single_chunk(self):
         result = _make_result(chunks=[_make_chunk()])
@@ -237,10 +258,42 @@ class TestFormatResult:
         assert "[CITATIONS]" in text
         assert "A notable finding." in text
 
+    def test_citations_guaranteed_not_dropped(self):
+        """Citations must survive even when evidence is large."""
+        # Create many large chunks to fill the evidence budget.
+        big_chunks = [
+            _make_chunk(text="x" * 2000, reranked_score=0.9 - i * 0.01)
+            for i in range(30)
+        ]
+        cit = CitationSpan(
+            verbatim_text="Critical quote that must survive.",
+            source_url="https://example.com/page",
+            section_heading="Results",
+            char_start=0,
+            char_end=32,
+            token_start=0,
+            token_end=8,
+            title="Example Page",
+        )
+        result = _make_result(chunks=big_chunks, citations=[cit])
+        text = format_result(result)
+        assert "[CITATIONS]" in text
+        assert "Critical quote that must survive." in text
+
     def test_no_expansion_note(self):
         result = _make_result(total_iterations=0, total_urls_ingested=1)
         text = format_result(result)
         assert "No expansion performed" in text
+
+    def test_research_mode_passed_to_follow_up(self):
+        result = _make_result()
+        text = format_result(result, research_mode="fast")
+        assert "DEEP SEARCH" in text
+
+    def test_deep_mode_no_deep_search_suggestion(self):
+        result = _make_result()
+        text = format_result(result, research_mode="deep")
+        assert "DEEP SEARCH" not in text
 
 
 class TestBuildStats:
@@ -453,3 +506,134 @@ class TestBuildCitations:
         assert "..." in section
         # Should be truncated to ~300 chars.
         assert len(section) < 600
+
+
+class TestPresentationGuide:
+    def test_always_has_header(self):
+        guide = _build_presentation_guide(
+            has_citations=False,
+            has_expansion_trace=False,
+            has_images=False,
+            has_follow_up=False,
+        )
+        assert "[PRESENTATION GUIDE]" in guide
+
+    def test_always_has_citation_directive(self):
+        guide = _build_presentation_guide(
+            has_citations=False,
+            has_expansion_trace=False,
+            has_images=False,
+            has_follow_up=False,
+        )
+        assert "Inline citations" in guide
+
+    def test_mentions_expansion_trace_when_present(self):
+        guide = _build_presentation_guide(
+            has_citations=False,
+            has_expansion_trace=True,
+            has_images=False,
+            has_follow_up=False,
+        )
+        assert "expansion trace" in guide.lower()
+
+    def test_omits_expansion_trace_when_absent(self):
+        guide = _build_presentation_guide(
+            has_citations=False,
+            has_expansion_trace=False,
+            has_images=False,
+            has_follow_up=False,
+        )
+        assert "EXPANSION TRACE" not in guide
+
+    def test_mentions_images_when_present(self):
+        guide = _build_presentation_guide(
+            has_citations=False,
+            has_expansion_trace=False,
+            has_images=True,
+            has_follow_up=False,
+        )
+        assert "image" in guide.lower()
+
+    def test_mentions_follow_up_when_present(self):
+        guide = _build_presentation_guide(
+            has_citations=False,
+            has_expansion_trace=False,
+            has_images=False,
+            has_follow_up=True,
+        )
+        assert "FOLLOW-UP OPTIONS" in guide
+
+    def test_numbering_is_sequential(self):
+        guide = _build_presentation_guide(
+            has_citations=True,
+            has_expansion_trace=True,
+            has_images=True,
+            has_follow_up=True,
+        )
+        # Should have items 1 through 6.
+        assert "1." in guide
+        assert "2." in guide
+        assert "3." in guide
+        assert "4." in guide
+        assert "5." in guide
+        assert "6." in guide
+
+
+class TestFollowUpOptions:
+    def test_always_has_header(self):
+        result = _make_result()
+        section = _build_follow_up_options(result)
+        assert "[FOLLOW-UP OPTIONS]" in section
+
+    def test_always_has_follow_up_search(self):
+        result = _make_result()
+        section = _build_follow_up_options(result)
+        assert "FOLLOW-UP SEARCH" in section
+
+    def test_always_has_refine_query(self):
+        result = _make_result()
+        section = _build_follow_up_options(result)
+        assert "REFINE QUERY" in section
+
+    def test_fast_mode_suggests_deep_search(self):
+        result = _make_result(expansion_steps=[])
+        section = _build_follow_up_options(result, research_mode="fast")
+        assert "DEEP SEARCH" in section
+
+    def test_deep_mode_no_deep_suggestion(self):
+        result = _make_result(expansion_steps=[])
+        section = _build_follow_up_options(result, research_mode="deep")
+        assert "DEEP SEARCH" not in section
+
+    def test_budget_limited_expansion_suggests_continue(self):
+        step = ExpansionStep(
+            iteration=1,
+            depth=1,
+            source_url="https://example.com/a",
+            candidates_scored=5,
+            candidates_expanded=["https://example.com/b"],
+            candidates_failed=[],
+            chunks_added=10,
+            top_score_before=0.60,
+            top_score_after=0.72,
+            decision="stop",
+            reason="expansion budget exhausted",
+            duration_ms=1200.0,
+        )
+        result = _make_result(expansion_steps=[step])
+        section = _build_follow_up_options(result, research_mode="deep")
+        assert "CONTINUE EXPANSION" in section
+
+    def test_chunk_mode_suggests_full_context(self):
+        result = _make_result(mode="chunk")
+        section = _build_follow_up_options(
+            result, research_mode="fast", retrieval_mode="chunk",
+        )
+        assert "FULL CONTEXT" in section
+
+    def test_full_context_mode_no_full_context_suggestion(self):
+        result = _make_result(mode="full_context")
+        section = _build_follow_up_options(
+            result, research_mode="fast", retrieval_mode="full_context",
+        )
+        assert "FULL CONTEXT" not in section
