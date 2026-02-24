@@ -172,54 +172,71 @@ The retrieval layer supports both modes. The MCP layer now defaults to `chunk` m
 
 - `answer` defaults to a fast pass: chunked retrieval and no expansion unless explicitly requested.
 - `answer` supports explicit overrides such as `research_mode="deep"` and `retrieval_mode="full_context"`.
-- The formatter can append a `[NEXT STEP]` recommendation so the model asks the user before running a slower deep expansion pass.
+- Every tool response starts with a `[PRESENTATION GUIDE]` — inline directives that tell the model exactly which sections to include in its answer (ACI poka-yoke pattern).
+- Every tool response ends with `[FOLLOW-UP OPTIONS]` — context-sensitive suggestions (deep search, continued expansion, full context, follow-up search, query refinement) that the model presents to the user.
+- Citations are guaranteed (never dropped by the token budget). The formatter builds citations before allocating space to evidence.
 - The orchestration engine emits richer phase and iteration progress callbacks that the MCP layer surfaces as progress notifications.
 
 ### Response Format
 
-Tool responses use bracketed section headers for unambiguous LLM parsing:
+Tool responses use bracketed section headers for unambiguous LLM parsing. Every response includes 5 guaranteed sections and up to 3 conditional sections:
 
 ```
-[SOURCES]
+[PRESENTATION GUIDE]                    ← guaranteed, inline directives for the model
+Your response to the user MUST include:
+1. A synthesized answer ...
+2. Inline citations for every claim ...
+3. Use the [CITATIONS] section below ...
+...
+
+[SOURCES]                               ← guaranteed
 [1] Page Title — https://example.com/page
     § Section Heading
 
-[EVIDENCE]
+[EVIDENCE]                              ← budget-dependent, fills remaining space
 Source [1] (relevance: 0.87, confidence: 0.92):
 Relevant text content here...
 
-[IMAGES]
+[IMAGES]                                ← conditional (if images found + budget)
 - [Alt text](https://example.com/image.png) (from Source [1])
 
-[EXPANSION TRACE]
+[EXPANSION TRACE]                       ← conditional (if expansion occurred + budget)
 Base: https://example.com/
-/page (seed, score: 0.72 → 0.87)
-├── /subpage (depth 1, +12 chunks, score: 0.72 → 0.87, 4200ms)
+/page (seed)
+├── /subpage (depth 1, +12 chunks)
 
-[CITATIONS]
+[CITATIONS]                             ← guaranteed (never dropped by budget)
 [1] "Verbatim quote from the source"
     — Page Title, https://example.com/page § Section
 
-[STATS]
+[STATS]                                 ← guaranteed
 Mode: chunk
 Documents searched: 3
 Chunks evaluated: 45
 Expansion iterations: 1
 Total time: 5200ms
+
+[FOLLOW-UP OPTIONS]                     ← guaranteed, context-sensitive
+- DEEP SEARCH: This was a fast single-page pass ...
+- FOLLOW-UP SEARCH: The indexed content is available ...
+- REFINE QUERY: If results are too broad ...
 ```
 
 ### Token Budget Strategy
 
-The formatter manages a soft token budget (`MCP_RESPONSE_TOKEN_BUDGET`, default 30k) to keep responses within model context limits:
+The formatter manages a soft token budget (`MCP_RESPONSE_TOKEN_BUDGET`, default 30k) to keep responses within model context limits. Sections are split into guaranteed (never dropped) and budget-dependent (fills remaining space):
 
-1. **[SOURCES]** — always included in full (compact, essential for attribution)
-2. **[STATS]** — always included in full (small, useful for diagnostics)
-3. **[EVIDENCE]** — fills remaining budget, sorted by relevance; truncates with a count note
-4. **[EXPANSION TRACE]** — included if budget allows, otherwise replaced with summary
-5. **[IMAGES]** — included if budget allows
-6. **[CITATIONS]** — included if budget allows
+**Guaranteed (built first, subtracted from budget):**
+1. **[PRESENTATION GUIDE]** — inline directives for the model (~80–120 tokens)
+2. **[SOURCES]** — always included in full (compact, essential for attribution)
+3. **[STATS]** — always included in full (small, useful for diagnostics)
+4. **[CITATIONS]** — always included in full (promoted from budget-dependent to guaranteed so citations are never silently dropped)
+5. **[FOLLOW-UP OPTIONS]** — context-sensitive next-step suggestions (~80–150 tokens)
 
-The MCP formatter now reserves response budget for citations and images before allocating the full remainder to evidence. This preserves citation fidelity when a single source page produces very large evidence blocks.
+**Budget-dependent (fills remaining space):**
+6. **[EVIDENCE]** — fills remaining budget, sorted by relevance; truncates with a count note
+7. **[EXPANSION TRACE]** — included if budget allows, otherwise replaced with summary
+8. **[IMAGES]** — included if budget allows
 
 ### Transport Modes
 

@@ -38,13 +38,13 @@ WebRAG is a **Model Context Protocol (MCP)** server that turns web pages into se
 
 | Feature | Description |
 |---------|-------------|
-| **MCP Integration** | Three tools (`answer`, `search`, `status`) exposed via the Model Context Protocol. Fast defaults plus explicit deep/full-context controls. Works with Claude Desktop, Cursor, and any MCP-compatible client. |
+| **MCP Integration** | Three tools (`answer`, `search`, `status`) exposed via the Model Context Protocol. Fast defaults plus explicit deep/full-context controls. Every response includes an inline presentation guide and context-sensitive follow-up options for consistent output. Works with Claude Desktop, Cursor, and any MCP-compatible client. |
 | **Smart Corpus Expansion** | Default MCP behavior is no expansion for speed. Deep expansion is available on demand and uses link candidate scoring (URL heuristics, title/description relevance) to avoid low-yield crawls. |
 | **Semantic Chunking** | Splits pages by heading structure into parent/child chunks. Parents provide context; children are embedded for precise ANN search. |
 | **Rich Content Handling** | Preserves tables, code blocks, math (MathML → LaTeX), and images through HTML surface detection. The formatter converts these to clean, readable text for the model. |
 | **Provider-Agnostic Reranking** | Supports ZeroEntropy, Cohere, Jina, or no reranking. Dramatically improves result quality by rescoring passages with a cross-encoder. |
 | **Query Decomposition** | Complex questions are split into sub-queries (via LLM or rule-based patterns) and retrieved concurrently. Results are merged with MMR deduplication. |
-| **Citation Fidelity** | Verbatim quotes reconstructed from stored character offsets. No paraphrasing - every citation maps to exact source text. |
+| **Citation Fidelity** | Verbatim quotes reconstructed from stored character offsets. No paraphrasing - every citation maps to exact source text. Citations are guaranteed in the token budget and never silently dropped. |
 | **Intelligent Stopping** | 11-rule decision matrix evaluates score distributions to decide when to stop expanding. Token budget saturation, plateau detection, and diminishing returns - not arbitrary depth limits. |
 | **Persistent Memory** | Indexed content lives in Postgres. Ask follow-up questions hours later without re-scraping. |
 
@@ -148,9 +148,9 @@ python -m src.mcp_server.server --transport streamable-http
 Scrapes a URL (if needed), decomposes your question, retrieves and reranks evidence, optionally expands to linked pages, and returns cited results.
 
 Default MCP behavior is optimized for responsiveness:
-- chunked retrieval
+- chunked retrieval with guaranteed citations
 - no expansion unless explicitly requested
-- tool may return a recommendation asking the model to ask the user before a slower deep pass
+- every response includes a `[PRESENTATION GUIDE]` (inline directives for the model) and `[FOLLOW-UP OPTIONS]` (context-sensitive next steps such as deep search, full context, or query refinement)
 
 ```
 answer(
@@ -275,7 +275,7 @@ Local servers aren't rate-limited, so you can safely increase `EMBEDDING_MAX_WOR
 | `MCP_RESPONSE_TOKEN_BUDGET` | `30000` | Soft ceiling on response size. Higher = more evidence, more tokens. |
 | `MCP_DEFAULT_RESEARCH_MODE` | `fast` | Default MCP behavior. `fast` disables expansion unless explicitly requested. |
 | `MCP_DEFAULT_RETRIEVAL_MODE` | `chunk` | Default retrieval mode for MCP tools. Keeps responses smaller and improves citation visibility. |
-| `MCP_CITATIONS_RESERVED_TOKENS` | `1500` | Reserved response budget for `[CITATIONS]`. |
+| `MCP_CITATIONS_RESERVED_TOKENS` | `1500` | Deprecated — citations are now guaranteed (never dropped). Kept for backward compatibility. |
 | `MCP_IMAGES_RESERVED_TOKENS` | `500` | Reserved response budget for `[IMAGES]`. |
 | `MCP_TOOL_TIMEOUT` | `120` | Seconds before the `answer` tool times out. |
 | `MCP_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, or `WARNING`. |

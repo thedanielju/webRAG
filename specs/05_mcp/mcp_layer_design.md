@@ -116,7 +116,7 @@ Before specifying tools, it's important to understand how MCP tool calls flow �
 1. **User sends a message** to the reasoning model (Claude, ChatGPT, etc.).
 2. **The model decides whether to call a tool.** It sees the tool's name, description, and input schema — that's all it knows about the server. Based on the description, it decides whether this query needs WebRAG and constructs the parameters itself (picks the URL, formulates the query, etc.).
 3. **The model sends a tool call request** to the MCP server. The user sees a "using tool" indicator but not the raw request.
-4. **The MCP server runs orchestration and returns text.** This is the formatted response — [SOURCES], [EVIDENCE], [CITATIONS], [STATS] blocks. It goes back to the model as tool result content.
+4. **The MCP server runs orchestration and returns text.** This is the formatted response — [PRESENTATION GUIDE], [SOURCES], [EVIDENCE], [IMAGES], [EXPANSION TRACE], [CITATIONS], [STATS], and [FOLLOW-UP OPTIONS] blocks. It goes back to the model as tool result content.
 5. **The model reads the tool result and writes its response to the user.** The model reads the formatted text like a person reading a research brief, then synthesizes its answer — citing sources, quoting verbatim text, referencing scores and metadata as it sees fit.
 
 ### 4.2 What This Means for Formatting
@@ -239,6 +239,15 @@ The MCP layer transforms `OrchestrationResult` into structured plain text. MCP t
 ### 6.1 Response Structure
 
 ```
+[PRESENTATION GUIDE]
+Your response to the user MUST include:
+1. A synthesized answer using the evidence below — do not dump raw sections
+2. Inline citations for every claim, referencing [Source N] from the [SOURCES] list
+3. Use the [CITATIONS] section below for exact quotes with attribution
+4. Include the expansion trace tree diagram from [EXPANSION TRACE] ...
+5. Present the follow-up options from [FOLLOW-UP OPTIONS] at the end of your response
+Do NOT omit citations or the expansion trace.
+
 [SOURCES]
 [1] {title} — {url}
     § {section_heading}
@@ -259,6 +268,10 @@ Source [2] (relevance: 0.71):
 [EXPANSION TRACE]
 {ascii traversal diagram}
 
+[CITATIONS]
+[1] "Verbatim quote from the source"
+    — Page Title, https://example.com/page § Section
+
 [STATS]
 Mode: chunk (selective retrieval)
 Documents searched: 5
@@ -267,6 +280,12 @@ Expansion iterations: 2
 URLs ingested: 3
 Stop reason: score plateau — top-10 variance below threshold
 Total time: 2340ms (analysis: 180ms, retrieval: 890ms, reranking: 620ms, expansion: 450ms, locality: 120ms, merge: 80ms)
+
+[FOLLOW-UP OPTIONS]
+- DEEP SEARCH: This was a fast single-page pass. For broader multi-page ...
+- FULL CONTEXT: For exhaustive single-source analysis ...
+- FOLLOW-UP SEARCH: The indexed content is available for follow-up questions ...
+- REFINE QUERY: If results are too broad or not specific enough ...
 ```
 
 ### 6.2 Section Details
@@ -353,6 +372,28 @@ Each node shows:
 
 **Building the tree:** `ExpansionStep` records are flat (one per iteration). The tree structure is reconstructed from `depth` values and `source_url` to build parent-child relationships. The seed URL is always the root.
 
+#### [PRESENTATION GUIDE] — Inline Directives
+
+Always present (guaranteed). Placed at the **top** of every tool response so the model reads the formatting instructions before processing evidence. This is the ACI poka-yoke pattern — make the correct presentation behavior the easiest path.
+
+Content is dynamic — only references sections that actually exist in the current response. For example, items about the expansion trace and images only appear when those sections are present. Numbered items ensure the model follows a consistent output structure.
+
+Cost: ~80–120 tokens.
+
+#### [FOLLOW-UP OPTIONS] — Context-Sensitive Next Steps
+
+Always present (guaranteed). Replaces the former conditional `[NEXT STEP]` block. Suggests relevant next actions based on the current pipeline state:
+
+- **Fast mode, no expansion** → suggests deep recursive subtree search (with explicit "ask user before running" instruction).
+- **Expansion occurred but was budget/depth-limited** → suggests higher `expansion_budget` or continued expansion.
+- **Chunk mode** → suggests `retrieval_mode="full_context"` for exhaustive single-source analysis.
+- **Always** → suggests `search` tool for follow-up questions on already-indexed content.
+- **Always** → suggests refining the query.
+
+Requires `format_result()` to receive `research_mode` and `retrieval_mode` kwargs (passed from `tools.py`).
+
+Cost: ~80–150 tokens.
+
 #### [STATS] — Summary Block
 
 Always present. Provides the model with context about retrieval quality and performance.
@@ -378,13 +419,19 @@ Additional notes appended when relevant:
 
 The formatted response is governed by `mcp_response_token_budget` (default: 30,000 tokens, configurable). This is the **formatted output** budget, not the orchestration context budget.
 
-**Budget allocation priority (highest to lowest):**
+**Budget allocation — guaranteed sections are built first, then variable sections fill the remainder:**
 
-1. **[SOURCES]** — Always included in full. Typically small (< 500 tokens).
-2. **[STATS]** — Always included in full. Tiny (< 200 tokens).
-3. **[EVIDENCE]** — Fills remaining budget. Chunks are included in reranked-score order. When the budget is approached, stop adding chunks.
-4. **[EXPANSION TRACE]** — Included if budget allows after evidence. Omitted with a note if truncated: `[Expansion trace omitted — {N} iterations, see stats above]`.
-5. **[IMAGES]** — Included if budget allows after evidence.
+Guaranteed (never dropped):
+1. **[PRESENTATION GUIDE]** — Always included. ~80–120 tokens.
+2. **[SOURCES]** — Always included in full. Typically small (< 500 tokens).
+3. **[STATS]** — Always included in full. Tiny (< 200 tokens).
+4. **[CITATIONS]** — Always included in full. Promoted from budget-dependent to guaranteed so citations are never silently dropped.
+5. **[FOLLOW-UP OPTIONS]** — Always included. ~80–150 tokens.
+
+Budget-dependent (fills remaining space):
+6. **[EVIDENCE]** — Fills remaining budget. Chunks are included in reranked-score order. When the budget is approached, stop adding chunks.
+7. **[EXPANSION TRACE]** — Included if budget allows after evidence. Omitted with a note if truncated: `[Expansion trace omitted — {N} iterations, see stats above]`.
+8. **[IMAGES]** — Included if budget allows after evidence.
 
 If chunks are truncated:
 ```
@@ -709,7 +756,7 @@ src/05_mcp_server/
 
 **`tools.py`** — Defines all tool functions (`answer`, `search`, `status`). The `answer` handler calls `engine.run()` with timeout wrapping and progress notifications, handles multi-URL pre-ingestion, and passes the `OrchestrationResult` to the formatter. The `search` handler calls `retrieve()` + `rerank()` directly. The `status` handler queries the database. All handlers handle their error categories (§8) and return appropriate MCP responses.
 
-**`formatter.py`** — The core formatting logic. Takes `OrchestrationResult` and produces the final text response. Orchestrates the section assembly: [SOURCES], [EVIDENCE], [IMAGES], [EXPANSION TRACE], [CITATIONS], [STATS]. Manages the token budget, deciding how many chunks to include. Builds the ASCII traversal diagram from `ExpansionStep` records.
+**`formatter.py`** — The core formatting logic. Takes `OrchestrationResult` and produces the final text response. Orchestrates the section assembly: [PRESENTATION GUIDE], [SOURCES], [EVIDENCE], [IMAGES], [EXPANSION TRACE], [CITATIONS], [STATS], [FOLLOW-UP OPTIONS]. Manages the token budget with guaranteed sections (sources, stats, citations, presentation guide, follow-up options) built first and variable sections (evidence, trace, images) filling the remainder. Builds the ASCII traversal diagram from `ExpansionStep` records. Accepts `research_mode` and `retrieval_mode` kwargs to generate context-sensitive follow-up options.
 
 **`html_converter.py`** — Stateless conversion functions for HTML → readable text. One function per element type (tables, code blocks, MathML, definition lists, admonitions, images). Also extracts image metadata. Called by `formatter.py` when processing chunks with `surface="html"`.
 
@@ -872,7 +919,7 @@ Items deferred from v1 but architecturally anticipated:
 The MCP layer is the thinnest layer in the WebRAG stack. It:
 1. Manages the engine lifecycle (start/stop).
 2. Defines three tools: `answer` (full orchestration with multi-URL support), `search` (fast corpus query), and `status` (corpus inspection).
-3. Formats `OrchestrationResult` into structured text with citations, rich content, traversal diagrams, and stats — acting as a research brief for the reasoning model.
+3. Formats `OrchestrationResult` into structured text with an inline presentation guide, citations, rich content, traversal diagrams, stats, and follow-up options — acting as a research brief for the reasoning model. Citations are guaranteed (never dropped by budget), and the presentation guide uses the ACI poka-yoke pattern to drive consistent model output.
 4. Sends real-time progress notifications during orchestration so the user sees what's happening.
 5. Handles errors transparently, surfacing them as readable text so the model can inform the user rather than hallucinate.
 6. Supports both stdio (default, for local use) and Streamable HTTP (for remote/connector use) transports.
