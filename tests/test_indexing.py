@@ -145,6 +145,7 @@ def test_schema_validation(db_conn):
         assert "vector_cosine_ops" in row[1]
 
 
+@pytest.mark.live
 @pytest.mark.usefixtures("indexed_corpus")
 class TestIndexingIntegration:
     def test_document_rows_created(self, db_conn, indexed_corpus):

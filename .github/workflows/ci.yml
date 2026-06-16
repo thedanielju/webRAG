@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: webrag
+          POSTGRES_PASSWORD: webrag
+          POSTGRES_DB: webrag
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U webrag -d webrag"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Run non-live tests
+        env:
+          DATABASE_URL: postgresql://webrag:webrag@localhost:5432/webrag
+        run: pytest -q -m "not live"

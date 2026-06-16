@@ -54,6 +54,7 @@ def _metadata_dump(result: Any, payload: dict[str, Any]) -> dict[str, Any]:
 
 # calls the scrape wrapper, convert result to dict, print keys and a preview
 # and if the response isn't empty
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_firecrawl_scrape_smoke():
     firecrawl_client = _import_client_or_skip()
