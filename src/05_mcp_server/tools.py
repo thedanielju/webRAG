@@ -140,6 +140,11 @@ async def _mcp_progress_notifier(ctx: Context, phase: str, data: dict[str, Any])
             f"score→{float(data.get('top_score_after', 0.0)):.2f}, "
             f"{float(data.get('duration_ms', 0.0)):.0f}ms."
         )
+    elif phase == "backstop_tripped":
+        await ctx.info(
+            f"Recursion halted by safety backstop ({data.get('stop_reason', 'n/a')}): "
+            f"{data.get('pages', 0)} pages, depth {data.get('depth', 0)}."
+        )
     elif phase == "locality_start":
         await ctx.info("Applying locality expansion…")
     elif phase == "merge_start":

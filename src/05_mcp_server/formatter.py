@@ -39,6 +39,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Human phrasing for the recursion stop_reason vocabulary surfaced in the
+# [SEARCH] line.  "quality" / "max_depth" are evaluator-driven (the normal
+# path); the rest are hard-backstop halts.
+_STOP_REASON_PHRASES: dict[str, str] = {
+    "quality": "diminishing returns",
+    "max_depth": "reached max expansion depth",
+    "max_pages": "page-count safety limit",
+    "max_tokens": "indexed-token safety limit",
+    "wallclock": "wall-clock time budget",
+}
+
 # Lazy-initialised tokenizer (module-level singleton).
 # We avoid loading tiktoken at import time because it downloads
 # the encoding file on first use, which would slow cold starts.
@@ -639,6 +650,20 @@ def _build_stats(result: OrchestrationResult) -> str:
         f"URLs ingested: {result.total_urls_ingested}",
         f"Stop reason: {result.final_decision.reason}",
     ]
+
+    # Recursion descent summary — deep runs only.  Fast mode performs no
+    # expansion (no steps), so the line is omitted and fast output is
+    # byte-for-byte unchanged.  The stop_reason vocabulary is mapped to a
+    # short human phrase so the model can relay traversal depth and why the
+    # descent ended.
+    if result.expansion_steps:
+        stop_phrase = _STOP_REASON_PHRASES.get(
+            result.stop_reason, result.stop_reason,
+        )
+        lines.append(
+            f"[SEARCH] depth {result.max_depth_reached}, "
+            f"stopped: {stop_phrase}"
+        )
 
     # Reachability coverage — present only when deep-mode reachability ran.
     # reachable_total is None in fast/auto mode, so the line is omitted

@@ -170,6 +170,11 @@ class OrchestratorEngine:
         universe via Firecrawl /map and report coverage.
         """
         total_start = time.perf_counter()
+        # Monotonic clock for the wall-clock backstop.  perf_counter() is
+        # used elsewhere for sub-phase timing; this is the single reference
+        # point against which the whole-answer budget is measured so it
+        # cannot drift if a sub-phase resets its own start.
+        loop_start = time.monotonic()
         timing = OrchestrationTiming()
 
         state = OrchestrationState(
@@ -271,6 +276,34 @@ class OrchestratorEngine:
                 decision.action != "stop"
                 and state.iteration < max_iterations
             ):
+                # ── Hard safety backstops ─────────────────────
+                # Checked at loop entry, BEFORE the next (expensive)
+                # expansion round, so a breached budget halts genuine
+                # multi-level descent before more pages are scraped.
+                # The evaluator remains the primary stop — these only fire
+                # on pathological runs that the quality logic never reached.
+                backstop = self._check_backstops(state, loop_start)
+                if backstop is not None:
+                    state.stop_reason = backstop
+                    logger.warning(
+                        "expansion halted by backstop '%s' "
+                        "(pages=%d, tokens=%d, elapsed=%.1fs, depth=%d)",
+                        backstop,
+                        len(state.ingested_urls),
+                        state.tokens_indexed,
+                        time.monotonic() - loop_start,
+                        state.max_depth_reached,
+                    )
+                    await _emit_progress(
+                        progress_callback,
+                        "backstop_tripped",
+                        stop_reason=backstop,
+                        pages=len(state.ingested_urls),
+                        tokens=state.tokens_indexed,
+                        depth=state.max_depth_reached,
+                    )
+                    break
+
                 state.iteration += 1
                 top_score_before = signals.top_score
                 outcome = None  # Track breadth expansion outcome.
@@ -297,6 +330,15 @@ class OrchestratorEngine:
                     )
                     state.ingested_urls.update(outcome.urls_ingested)
                     state.current_depth = outcome.depth
+                    # Genuine descent: each breadth round increments depth
+                    # (links → their links → …) because the next round draws
+                    # candidates from ALL ingested URLs, including pages just
+                    # fetched at this depth.  Track the deepest level reached
+                    # and accumulate the token proxy for the backstop.
+                    state.max_depth_reached = max(
+                        state.max_depth_reached, outcome.depth,
+                    )
+                    state.tokens_indexed += outcome.tokens_indexed
                     # Record the reachable universe size the first time a
                     # deep-mode iteration maps it (None means it didn't run).
                     if isinstance(outcome.reachable_total, int):
@@ -402,6 +444,18 @@ class OrchestratorEngine:
                     )
                 )
 
+            # ── Resolve stop provenance ───────────────────────
+            # A backstop, if it fired, already set state.stop_reason and
+            # broke the loop.  Otherwise the evaluator owns the stop: map
+            # its depth-cap halt to "max_depth", everything else to the
+            # normal "quality" stop.
+            if state.stop_reason == "quality":
+                if (
+                    decision.action == "stop"
+                    and "max expansion depth" in decision.reason.lower()
+                ):
+                    state.stop_reason = "max_depth"
+
             # ── Phase 5: Locality Expansion ───────────────────
             await _emit_progress(progress_callback, "locality_start")
             loc_start = time.perf_counter()
@@ -469,6 +523,8 @@ class OrchestratorEngine:
                 final_decision=decision,
                 total_iterations=state.iteration,
                 total_urls_ingested=len(state.ingested_urls),
+                max_depth_reached=state.max_depth_reached,
+                stop_reason=state.stop_reason,
                 reachable_total=reachable_total,
                 indexed_count=indexed_count,
                 coverage_ratio=coverage_ratio,
@@ -476,6 +532,35 @@ class OrchestratorEngine:
 
         finally:
             await self._release_connection(conn)
+
+    # ── Hard safety backstops ─────────────────────────────────
+
+    @staticmethod
+    def _check_backstops(
+        state: OrchestrationState,
+        loop_start: float,
+    ) -> str | None:
+        """Return a backstop stop_reason if a hard ceiling is breached.
+
+        These are conservative whole-answer ceilings for genuine N-level
+        recursion — pages indexed, content tokens indexed, and wall-clock
+        elapsed.  They are deliberately far above what a quality-driven run
+        reaches, so the evaluator (the PRIMARY stop) almost always halts the
+        loop first.  Checked in the order pages → tokens → wallclock; the
+        first breach wins.
+
+        Returns ``None`` when every budget still has headroom.
+        """
+        if len(state.ingested_urls) >= settings.max_pages_per_answer:
+            return "max_pages"
+        if state.tokens_indexed >= settings.max_tokens_indexed_per_answer:
+            return "max_tokens"
+        if (
+            time.monotonic() - loop_start
+            >= settings.answer_wallclock_budget_seconds
+        ):
+            return "wallclock"
+        return None
 
     # ── Corpus preparation ────────────────────────────────────
 

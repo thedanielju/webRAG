@@ -1478,6 +1478,87 @@ class TestReachabilityCoverageMath:
         assert "[COVERAGE]" not in fast_stats
 
 
+class TestFormatterSearchDepthLine:
+    """The [SEARCH] depth/stop line appears for deep runs, not fast ones."""
+
+    def _make_result(self, *, expansion_steps, max_depth_reached, stop_reason):
+        from src.orchestration.models import (
+            OrchestrationResult,
+            OrchestrationTiming,
+        )
+
+        return OrchestrationResult(
+            chunks=[],
+            citations=[],
+            query_analysis=_make_query_analysis(),
+            expansion_steps=expansion_steps,
+            corpus_stats=CorpusStats(
+                total_documents=1, total_parent_chunks=1,
+                total_tokens=10, documents_matched=[],
+            ),
+            timing=OrchestrationTiming(),
+            mode="chunk",
+            final_decision=ExpansionDecision(
+                action="stop", reason="done", confidence="high",
+            ),
+            total_iterations=len(expansion_steps),
+            total_urls_ingested=1 + len(expansion_steps),
+            max_depth_reached=max_depth_reached,
+            stop_reason=stop_reason,
+        )
+
+    def _step(self, iteration: int, depth: int) -> ExpansionStep:
+        from src.orchestration.models import ExpansionStep
+
+        return ExpansionStep(
+            iteration=iteration,
+            depth=depth,
+            source_url="https://example.com",
+            candidates_scored=1,
+            candidates_expanded=[f"https://example.com/d{depth}"],
+            candidates_failed=[],
+            chunks_added=1,
+            top_score_before=0.3,
+            top_score_after=0.5,
+            decision="expand_breadth",
+            reason="more sources",
+            duration_ms=10.0,
+        )
+
+    def test_deep_run_emits_search_line_with_depth_and_reason(self):
+        from src.mcp_server.formatter import _build_stats
+
+        result = self._make_result(
+            expansion_steps=[self._step(1, 1), self._step(2, 2), self._step(3, 3)],
+            max_depth_reached=3,
+            stop_reason="quality",
+        )
+        stats = _build_stats(result)
+        assert "[SEARCH] depth 3, stopped: diminishing returns" in stats
+
+    def test_backstop_stop_reason_phrased(self):
+        from src.mcp_server.formatter import _build_stats
+
+        result = self._make_result(
+            expansion_steps=[self._step(1, 1), self._step(2, 2)],
+            max_depth_reached=2,
+            stop_reason="max_pages",
+        )
+        stats = _build_stats(result)
+        assert "[SEARCH] depth 2, stopped: page-count safety limit" in stats
+
+    def test_fast_run_omits_search_line(self):
+        from src.mcp_server.formatter import _build_stats
+
+        result = self._make_result(
+            expansion_steps=[],
+            max_depth_reached=0,
+            stop_reason="quality",
+        )
+        stats = _build_stats(result)
+        assert "[SEARCH]" not in stats
+
+
 # ===================================================================
 # 1.6  Merger Tests
 # ===================================================================
@@ -1837,6 +1918,8 @@ class TestEngineOneExpansion:
             candidates_selected=1,
             chunks_added=3,
             depth=1,
+            reachable_total=None,
+            tokens_indexed=50,
         ))
 
         with _override_settings(
@@ -2016,7 +2099,7 @@ class TestEngineMaxIterationCap:
         expand_mock = AsyncMock(return_value=MagicMock(
             urls_ingested=["https://example.com/exp"],
             urls_failed=[], candidates_scored=1, candidates_selected=1,
-            chunks_added=1, depth=1,
+            chunks_added=1, depth=1, reachable_total=None, tokens_indexed=1,
         ))
 
         with _override_settings(
@@ -2040,6 +2123,200 @@ class TestEngineMaxIterationCap:
         assert result.total_iterations <= max_depth
         assert result.final_decision.action == "stop"
         assert "max expansion depth" in result.final_decision.reason.lower()
+
+
+def _always_expand_signals_decision(
+    *, action: str = "expand_breadth",
+) -> tuple[EvaluationSignals, ExpansionDecision]:
+    """Build a (signals, decision) pair the evaluator would return when it
+    wants another breadth round.  Used by the multi-level / backstop tests
+    so the loop keeps descending until a stop or a backstop fires."""
+    signals = EvaluationSignals(
+        top_score=0.4, score_at_k=0.4, score_cliff=0.0,
+        score_variance=0.0, score_mean=0.4,
+        chunks_above_threshold=1, token_fill_ratio=0.1,
+        redundancy_ratio=0.0, source_document_count=1,
+        avg_confidence=None, is_plateau=False, is_cliff=True,
+        is_saturated=False, is_mediocre_plateau=False,
+        has_high_redundancy=False,
+    )
+    decision = ExpansionDecision(
+        action=action, reason="Need more sources.", confidence="medium",
+    )
+    return signals, decision
+
+
+def _make_expand_outcome(depth: int, *, tokens_indexed: int = 100) -> MagicMock:
+    """A breadth ExpansionOutcome that ingests one fresh URL at *depth*."""
+    return MagicMock(
+        urls_attempted=[f"https://example.com/d{depth}"],
+        urls_ingested=[f"https://example.com/d{depth}"],
+        urls_failed=[],
+        candidates_scored=3,
+        candidates_selected=1,
+        chunks_added=2,
+        depth=depth,
+        reachable_total=None,
+        tokens_indexed=tokens_indexed,
+    )
+
+
+class TestEngineMultiLevelDescent:
+    """Genuine N-level recursion: links → their links → … descends >1 hop."""
+
+    @pytest.mark.asyncio
+    async def test_descends_multiple_levels(self):
+        from src.orchestration.engine import OrchestratorEngine
+
+        engine = OrchestratorEngine()
+
+        rr = _make_retrieval_result([_make_retrieved_chunk(score=0.4)], mode="chunk")
+
+        def make_rerank(query, passages, **kw):
+            scores = kw.get("original_scores", [0.5] * len(passages))
+            return [RerankResult(index=i, relevance_score=s) for i, s in enumerate(scores)]
+
+        # Evaluator: expand_breadth for rounds 1 and 2, then stop on round 3.
+        # Initial eval (iteration 0) + 3 post-iteration evals.
+        eval_seq = [
+            _always_expand_signals_decision(),  # initial
+            _always_expand_signals_decision(),  # after iter 1
+            _always_expand_signals_decision(),  # after iter 2
+            (
+                _always_expand_signals_decision()[0],
+                ExpansionDecision(
+                    action="stop", reason="Good plateau.", confidence="high",
+                ),
+            ),  # after iter 3 → halt
+        ]
+
+        # Each breadth round descends one level deeper.
+        depth_counter = {"d": 0}
+
+        async def fake_expand(*args, **kwargs):
+            depth_counter["d"] += 1
+            return _make_expand_outcome(depth_counter["d"])
+
+        with _override_settings(
+            reranker_provider="none",
+            decomposition_mode="none",
+            retrieval_context_budget=4096,
+            locality_expansion_enabled=False,
+            max_expansion_depth=5,
+            max_pages_per_answer=100,
+            max_tokens_indexed_per_answer=10_000_000,
+            answer_wallclock_budget_seconds=600,
+        ):
+            with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
+                with patch.object(engine, "_release_connection", new_callable=AsyncMock):
+                    with patch.object(engine, "_ensure_ingested", new_callable=AsyncMock):
+                        with patch("src.orchestration.engine.retrieve", AsyncMock(return_value=rr)):
+                            with patch("src.orchestration.engine.rerank", AsyncMock(side_effect=make_rerank)):
+                                with patch("src.orchestration.engine.evaluate", AsyncMock(side_effect=eval_seq)):
+                                    with patch("src.orchestration.engine.expand", AsyncMock(side_effect=fake_expand)):
+                                        result = await engine.run(
+                                            "https://example.com", "test query",
+                                            research_mode="deep",
+                                        )
+
+        # Three breadth rounds ran → descended to depth 3 (>= 2 required).
+        assert result.total_iterations == 3
+        assert result.max_depth_reached >= 2
+        assert result.max_depth_reached == 3
+        # Halted on the evaluator's quality stop, not a backstop.
+        assert result.stop_reason == "quality"
+        # Each round folded a fresh page into the corpus (seed ingestion is
+        # mocked out here, so only the 3 expanded pages are counted).
+        assert result.total_urls_ingested == 3
+
+
+class TestEngineBackstops:
+    """Hard safety ceilings set stop_reason and halt the descent."""
+
+    def _run_until_backstop(self, engine, *, overrides):
+        """Drive run() with an evaluator that never stops on its own, so a
+        backstop is the only thing that can halt the loop.  Returns the
+        OrchestrationResult."""
+        rr = _make_retrieval_result([_make_retrieved_chunk(score=0.4)], mode="chunk")
+
+        def make_rerank(query, passages, **kw):
+            scores = kw.get("original_scores", [0.5] * len(passages))
+            return [RerankResult(index=i, relevance_score=s) for i, s in enumerate(scores)]
+
+        # Evaluator ALWAYS wants to expand — the loop only ends via backstop
+        # (or the max_expansion_depth iteration cap, kept high here).
+        async def always_expand(*args, **kwargs):
+            return _always_expand_signals_decision()
+
+        depth_counter = {"d": 0}
+
+        async def fake_expand(*args, **kwargs):
+            depth_counter["d"] += 1
+            # Large per-round token bump so the token backstop can trip fast.
+            return _make_expand_outcome(depth_counter["d"], tokens_indexed=5000)
+
+        base = dict(
+            reranker_provider="none",
+            decomposition_mode="none",
+            retrieval_context_budget=4096,
+            locality_expansion_enabled=False,
+            max_expansion_depth=50,  # high so the iteration cap isn't the stop
+            max_pages_per_answer=1000,
+            max_tokens_indexed_per_answer=10_000_000,
+            answer_wallclock_budget_seconds=600,
+        )
+        base.update(overrides)
+
+        async def _go():
+            with _override_settings(**base):
+                with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
+                    with patch.object(engine, "_release_connection", new_callable=AsyncMock):
+                        with patch.object(engine, "_ensure_ingested", new_callable=AsyncMock):
+                            with patch("src.orchestration.engine.retrieve", AsyncMock(return_value=rr)):
+                                with patch("src.orchestration.engine.rerank", AsyncMock(side_effect=make_rerank)):
+                                    with patch("src.orchestration.engine.evaluate", AsyncMock(side_effect=always_expand)):
+                                        with patch("src.orchestration.engine.expand", AsyncMock(side_effect=fake_expand)):
+                                            return await engine.run(
+                                                "https://example.com", "test query",
+                                                research_mode="deep",
+                                            )
+
+        return asyncio.get_event_loop().run_until_complete(_go())
+
+    def test_max_pages_backstop(self):
+        from src.orchestration.engine import OrchestratorEngine
+
+        engine = OrchestratorEngine()
+        # Cap at 4 distinct pages.  Seed ingestion is mocked out, so the
+        # loop expands 4 fresh pages, then the next loop-entry check trips.
+        result = self._run_until_backstop(
+            engine, overrides={"max_pages_per_answer": 4},
+        )
+        assert result.stop_reason == "max_pages"
+        assert result.total_urls_ingested == 4
+
+    def test_max_tokens_backstop(self):
+        from src.orchestration.engine import OrchestratorEngine
+
+        engine = OrchestratorEngine()
+        # 5000 tokens/round; cap at 12000 → trips on the 3rd loop-entry check.
+        result = self._run_until_backstop(
+            engine, overrides={"max_tokens_indexed_per_answer": 12_000},
+        )
+        assert result.stop_reason == "max_tokens"
+
+    def test_wallclock_backstop(self):
+        from src.orchestration.engine import OrchestratorEngine
+
+        engine = OrchestratorEngine()
+        # Zero-second budget → the very first loop-entry check trips it,
+        # before any expansion round runs.
+        result = self._run_until_backstop(
+            engine, overrides={"answer_wallclock_budget_seconds": 0.0},
+        )
+        assert result.stop_reason == "wallclock"
+        # Backstop fired at loop entry, so no breadth round executed.
+        assert result.total_iterations == 0
 
 
 class TestEngineGracefulDegradation:

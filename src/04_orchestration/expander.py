@@ -214,6 +214,7 @@ async def expand(
             candidates_selected=0,
             depth=new_depth,
             reachable_total=reachable_total,
+            tokens_indexed=0,
         )
 
     selected = scored[: settings.max_candidates_per_iteration]
@@ -227,6 +228,7 @@ async def expand(
             candidates_selected=0,
             depth=new_depth,
             reachable_total=reachable_total,
+            tokens_indexed=0,
         )
 
     selected_urls = [s.link_candidate.target_url for s in selected]
@@ -251,12 +253,17 @@ async def expand(
 
     # 9. Index all successful scrapes.
     chunks_added = 0
+    tokens_indexed = 0
     if docs:
         depths = [new_depth] * len(docs)
         await index_batch(docs, depths, conn=conn)
         # Lower-bound estimate: actual chunk count depends on document
         # length and chunking config, but 1 doc ≥ 1 chunk always.
         chunks_added = len(docs)
+        # Word-count token proxy of newly-indexed content.  Cheap (no
+        # tokenizer load) and only feeds the hard MAX_TOKENS backstop, so
+        # an approximate count is fine.
+        tokens_indexed = sum(_estimate_doc_tokens(d) for d in docs)
 
     return ExpansionOutcome(
         urls_attempted=selected_urls,
@@ -267,6 +274,7 @@ async def expand(
         candidates_selected=len(selected),
         depth=new_depth,
         reachable_total=reachable_total,
+        tokens_indexed=tokens_indexed,
     )
 
 
@@ -313,6 +321,20 @@ async def _fetch_reachable_frontier(seed_url: str) -> list[str] | None:
         normalized.append(norm)
 
     return normalized
+
+
+# ── Token estimation ─────────────────────────────────────────────
+
+
+def _estimate_doc_tokens(doc: NormalizedDocument) -> int:
+    """Word-count token proxy for a freshly-ingested document.
+
+    Used only to feed the hard MAX_TOKENS_INDEXED_PER_ANSWER backstop, so
+    a whitespace split of the markdown (falling back to html) is precise
+    enough — no tokenizer load in the expansion hot path.
+    """
+    text = doc.markdown or doc.html or ""
+    return len(text.split())
 
 
 # ── Parent URL derivation ────────────────────────────────────────

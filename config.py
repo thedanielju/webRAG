@@ -162,6 +162,28 @@ class Settings(BaseSettings):
         default=True, validation_alias="REACHABILITY_ENABLED"
     )
 
+    # ── Orchestration: Hard safety backstops ──────────────────────
+    # These are a SAFETY BACKSTOP for genuine multi-level recursion, not
+    # the normal stop.  A quality-driven run halts via the evaluator long
+    # before any of these trip; they exist only to bound worst-case spend
+    # / latency on pathological sites.  When one trips, the loop stops and
+    # the breach is logged + surfaced as the run's stop_reason.
+    #
+    # Max distinct pages indexed across a single answer (seed + expansion).
+    max_pages_per_answer: int = Field(
+        default=25, validation_alias="MAX_PAGES_PER_ANSWER"
+    )
+    # Max total content tokens (word-count proxy) indexed during expansion
+    # across a single answer.
+    max_tokens_indexed_per_answer: int = Field(
+        default=200_000, validation_alias="MAX_TOKENS_INDEXED_PER_ANSWER"
+    )
+    # Wall-clock budget (seconds) for a single answer's run() loop,
+    # measured on a monotonic clock captured at run start.
+    answer_wallclock_budget_seconds: float = Field(
+        default=90.0, validation_alias="ANSWER_WALLCLOCK_BUDGET_SECONDS"
+    )
+
     # ── Orchestration: Locality Expansion ─────────────────────────
     locality_expansion_enabled: bool = Field(
         default=True, validation_alias="LOCALITY_EXPANSION_ENABLED"

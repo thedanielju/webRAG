@@ -117,6 +117,10 @@ class ExpansionOutcome(BaseModel):
     # Size of the reachable page universe (Firecrawl /map) when this
     # iteration ran reachability; None in fast mode or when disabled.
     reachable_total: int | None = None
+    # Word-count token proxy for the content newly indexed this iteration.
+    # Accumulated across rounds by the engine to enforce the
+    # MAX_TOKENS_INDEXED_PER_ANSWER backstop without re-tokenizing.
+    tokens_indexed: int = 0
 
 
 class ExpansionStep(BaseModel):
@@ -179,6 +183,15 @@ class OrchestrationResult(BaseModel):
     total_iterations: int
     total_urls_ingested: int
 
+    # ── Recursion descent + stop provenance ───────────────────────
+    # max_depth_reached is the deepest expansion level the loop descended
+    # to (0 = no expansion / single page).  stop_reason records WHY the
+    # loop halted: "quality" when the evaluator stopped on its own merits
+    # (the normal case), or one of the hard backstops ("max_pages",
+    # "max_tokens", "wallclock", "max_depth") when a safety ceiling tripped.
+    max_depth_reached: int = 0
+    stop_reason: str = "quality"
+
     # ── Reachability coverage (deep mode only) ────────────────────
     # reachable_total is the size of the seed's reachable page universe
     # as enumerated by Firecrawl /map.  It is None when reachability did
@@ -216,6 +229,18 @@ class OrchestrationState:
     # Iteration tracking.
     iteration: int = 0
     current_depth: int = 0
+    # Deepest expansion level reached so far (max of current_depth across
+    # rounds).  Surfaced on the result as max_depth_reached.
+    max_depth_reached: int = 0
+
+    # Why the loop stopped.  Defaults to "quality" (evaluator-driven) and
+    # is overwritten only when a hard backstop trips.  See
+    # OrchestrationResult.stop_reason for the value vocabulary.
+    stop_reason: str = "quality"
+
+    # Running total of content tokens (word-count proxy) indexed during
+    # expansion, used to enforce the MAX_TOKENS_INDEXED_PER_ANSWER backstop.
+    tokens_indexed: int = 0
 
     # Corpus state (grows across iterations).
     ingested_urls: set[str] = field(default_factory=set)
