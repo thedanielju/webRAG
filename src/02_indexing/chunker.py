@@ -28,6 +28,21 @@ _MARKDOWN_IMAGE_RE = re.compile(
     r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)\s]+)(?:\s+\"(?P<title>[^\"]*)\")?\)"
 )
 
+# LaTeX math delimiters for raw-path content (Firecrawl strips these, so
+# the regex is inert on the Firecrawl path).  Three alternations:
+#   - $$...$$ display math
+#   - \(...\) inline and \[...\] display (MathJax-recommended forms)
+#   - $...$ inline math, but ONLY when the body has a backslash command
+#     (\frac, \alpha, ...) or a sub/superscript (_ / ^), so plain currency
+#     like "$5" or "$5 to $10" never triggers a false positive.
+_LATEX_RE = re.compile(
+    r"\$\$.+?\$\$"
+    r"|\\\(.+?\\\)"
+    r"|\\\[.+?\\\]"
+    r"|\$[^$\n]*[\\_^][^$\n]*\$",
+    re.DOTALL,
+)
+
 # tokenization - loads whichever tokenizer is configured (tiktoken or HuggingFace) lazily on first calls, cached in _TOKEN_COUNTER
 
 def _build_token_counter() -> Callable[[str], int]:
@@ -74,11 +89,18 @@ def _detect_markdown_flags(text: str) -> RichContentFlags:
     has_table = bool(re.search(r"(?m)^\|.+\|\s*$", text))
     has_code = "```" in text
 
-    # Math: Firecrawl strips all LaTeX ($/$$ syntax) from markdown.
-    # Detection is HTML-only via _has_math_elements(); always False here.
-    # If a non-Firecrawl ingestion path is added later (e.g. raw HTML fetch,
-    # local file import), re-add a LaTeX regex here: r"\$\$.+?\$\$|\$.+?\$"
-    has_math = False
+    # Math: detect LaTeX delimiters in the markdown text.
+    #
+    # The Firecrawl path strips all LaTeX, so this regex never fires on
+    # Firecrawl markdown (math is caught HTML-side via _has_math_elements
+    # there) — no regression.  The raw-HTTP fetch path PRESERVES LaTeX, so
+    # re-enabling the regex flags math that has no HTML math markup.
+    #
+    # Delimiters: $$...$$ and $...$ (TeX), plus \(...\) / \[...\] (the
+    # MathJax-recommended forms).  _LATEX_RE requires the single-$ form to
+    # contain a backslash command or a sub/superscript so plain currency
+    # ("$5 and $10") does not false-positive.
+    has_math = bool(_LATEX_RE.search(text))
 
     # Definition lists: Firecrawl does not produce markdown definition-list
     # syntax (term:\n    def).  Detection is HTML-only via <dl> tags.

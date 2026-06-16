@@ -35,6 +35,34 @@ class Settings(BaseSettings):
         default=500, validation_alias="INGEST_DISCOVER_LINKS_DEFAULT_LIMIT"
     )
 
+    # Ingestion provider selection: "firecrawl" | "raw" | "auto".
+    #   firecrawl — always use Firecrawl (requires FIRECRAWL_API_KEY).
+    #   raw       — always use the key-free httpx + BeautifulSoup fetcher.
+    #   auto      — use Firecrawl when FIRECRAWL_API_KEY is set, else raw.
+    # Default is "auto" so the shipped paid path stays best-quality when a
+    # key is present, but a keyless install still works out of the box.
+    ingestion_provider: str = Field(
+        default="auto", validation_alias="INGESTION_PROVIDER"
+    )
+    # Per-request timeout (seconds) for the raw-HTTP fetch path and for
+    # robots.txt fetches.
+    raw_fetch_timeout_seconds: float = Field(
+        default=30.0, validation_alias="RAW_FETCH_TIMEOUT_SECONDS"
+    )
+
+    # ── Polite crawling (both fetch paths) ────────────────────────
+    # Honour robots.txt before fetching any URL (default true).  Disallowed
+    # URLs are skipped and surfaced, never crashing the run.
+    respect_robots_txt: bool = Field(
+        default=True, validation_alias="RESPECT_ROBOTS_TXT"
+    )
+    # Max fetches per second to a single origin (default 1.0).  Enforced by
+    # a per-origin async spacing limiter on both fetch paths.  Set to 0 to
+    # disable rate limiting.
+    crawl_rate_limit_rps: float = Field(
+        default=1.0, validation_alias="CRAWL_RATE_LIMIT_RPS"
+    )
+
     # Indexing / Embeddings
     database_url: str = Field(default="", validation_alias="DATABASE_URL")
     embedding_base_url: str = Field(

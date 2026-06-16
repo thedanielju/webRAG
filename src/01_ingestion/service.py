@@ -3,11 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone # needed for fetched_at timestamp
 import hashlib # generates content_hash
+import logging
 from typing import Any
 from urllib.parse import urldefrag, urlparse
 
 from config import settings
-from src.ingestion import firecrawl_client
+from src.ingestion import firecrawl_client, raw_fetch_client
+from src.ingestion.politeness import PolitenessGate
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -33,6 +37,47 @@ class LinkCandidate:
     url: str
     title: str | None
     description: str | None
+
+
+class IngestionSkipped(Exception):
+    """A URL was deliberately not ingested (robots.txt disallow or a
+    non-HTML/binary response on the raw path).  Raised instead of
+    returning an empty document so callers can distinguish a skip from a
+    real document and surface it.  Both orchestration callers already
+    treat ingest() exceptions as a per-URL skip without crashing the run.
+    """
+
+
+# ── Provider selection ────────────────────────────────────────────
+# "firecrawl" forces the paid client; "raw" forces the key-free path;
+# "auto" prefers Firecrawl when a key is present and falls back to raw.
+def _resolve_provider() -> str:
+    provider = (settings.ingestion_provider or "auto").strip().lower()
+    if provider == "firecrawl":
+        return "firecrawl"
+    if provider == "raw":
+        return "raw"
+    # auto
+    return "firecrawl" if settings.firecrawl_api_key else "raw"
+
+
+# A single politeness gate guards all fetches in this process.  Built
+# lazily from settings; tests can swap it via set_politeness_gate().
+_politeness_gate: PolitenessGate | None = None
+
+
+def _get_politeness_gate() -> PolitenessGate:
+    global _politeness_gate
+    if _politeness_gate is None:
+        _politeness_gate = PolitenessGate()
+    return _politeness_gate
+
+
+def set_politeness_gate(gate: PolitenessGate | None) -> None:
+    """Inject (or reset) the process-wide politeness gate.  Primarily for
+    tests; passing None forces a rebuild from current settings."""
+    global _politeness_gate
+    _politeness_gate = gate
 
 # sometimes, Firecrawl returns different response shapes
 
@@ -153,19 +198,78 @@ def _normalize_document(result: Any, input_url: str, doc_type: str) -> Normalize
     )
 
 
+async def _scrape_one(url: str) -> Any:
+    """Fetch one URL via the selected provider, applying the politeness
+    gate (robots + rate limit) first.  Returns the provider's raw scrape
+    result for _normalize_document.  Raises IngestionSkipped when robots
+    disallows the URL or the raw path hit a non-HTML/binary response."""
+    gate = _get_politeness_gate()
+    if not await gate.check_and_wait(url):
+        raise IngestionSkipped(f"robots.txt disallows {url}")
+
+    if _resolve_provider() == "raw":
+        result = await raw_fetch_client.scrape(url)
+        if getattr(result, "skipped", False):
+            reason = getattr(result, "skip_reason", None) or "unsupported content"
+            logger.info("raw ingest skipped %s: %s", url, reason)
+            raise IngestionSkipped(f"{url}: {reason}")
+        return result
+
+    # Firecrawl path — first so doc_type can use metadata-based detection.
+    return await firecrawl_client.scrape(url)
+
+
 async def ingest(url: str) -> NormalizedDocument:
-    # Scrape first so doc_type can use metadata-based detection.
-    result = await firecrawl_client.scrape(url)
+    result = await _scrape_one(url)
     doc_type = _detect_doc_type(url, result)
     return _normalize_document(result, input_url=url, doc_type=doc_type)
 
 
 async def ingest_batch(urls: list[str]) -> list[NormalizedDocument | None]:
-    results = await firecrawl_client.batch_scrape(urls)
+    # The raw path has no batch endpoint, and both paths must pass through
+    # the politeness gate per URL, so route batches through _scrape_one.
+    # Firecrawl's batch_scrape is still used directly when provider is
+    # firecrawl and robots permits every URL, preserving its throughput.
+    if _resolve_provider() == "raw":
+        normalized_documents: list[NormalizedDocument | None] = []
+        for url in urls:
+            try:
+                result = await _scrape_one(url)
+            except IngestionSkipped as exc:
+                logger.info("ingest_batch skipped %s", exc)
+                normalized_documents.append(None)
+                continue
+            except Exception as exc:  # noqa: BLE001 — one bad URL must not kill the batch
+                logger.warning("ingest_batch failed for %s: %r", url, exc)
+                normalized_documents.append(None)
+                continue
+            doc_type = _detect_doc_type(url, result)
+            normalized_documents.append(
+                _normalize_document(result, input_url=url, doc_type=doc_type)
+            )
+        return normalized_documents
 
-    normalized_documents: list[NormalizedDocument | None] = []
-    for url, result in zip(urls, results):
-        # Preserve positional alignment with input URLs for orchestration.
+    # Firecrawl path: gate each URL (robots + rate limit), drop disallowed
+    # URLs from the batch call, and re-expand results back to positional
+    # alignment with the input list.
+    gate = _get_politeness_gate()
+    allowed_urls: list[str] = []
+    allowed_flags: list[bool] = []
+    for url in urls:
+        permitted = await gate.check_and_wait(url)
+        allowed_flags.append(permitted)
+        if permitted:
+            allowed_urls.append(url)
+
+    fetched = await firecrawl_client.batch_scrape(allowed_urls) if allowed_urls else []
+    fetched_iter = iter(fetched)
+
+    normalized_documents = []
+    for url, permitted in zip(urls, allowed_flags):
+        if not permitted:
+            normalized_documents.append(None)
+            continue
+        result = next(fetched_iter, None)
         if result is None:
             normalized_documents.append(None)
             continue
@@ -181,6 +285,13 @@ async def ingest_batch(urls: list[str]) -> list[NormalizedDocument | None]:
 async def discover_links(
     url: str, limit: int = settings.ingest_discover_links_default_limit, exclude: set[str] | None = None
 ) -> list[LinkCandidate]:
+    # The /map reachability endpoint is Firecrawl-only.  On the key-free
+    # raw path there is no site-map service, so link discovery degrades to
+    # an empty candidate set (deep-mode reachability is opt-in and the
+    # orchestrator already tolerates an empty frontier).
+    if _resolve_provider() == "raw":
+        return []
+
     links = await firecrawl_client.map(url, limit=limit)
 
 # Calls map, initializes empty results list, converts exclude to an empty set if None was passed, so in excluded check always works without needing a None check later.
