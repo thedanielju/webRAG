@@ -2281,7 +2281,7 @@ class TestEngineBackstops:
                                                 research_mode="deep",
                                             )
 
-        return asyncio.get_event_loop().run_until_complete(_go())
+        return asyncio.run(_go())
 
     def test_max_pages_backstop(self):
         from src.orchestration.engine import OrchestratorEngine
