@@ -64,4 +64,4 @@ class LinkCandidate:
     description: str | None
 
 ## TEST IMPLEMENTATION
-PDF test — noted, add a PDF URL test case to scratch tests when we get to service.py testing. A good public PDF to test against: https://arxiv.org/pdf/1706.03762 (the Attention Is All You Need paper).
+PDF test: noted, add a PDF URL test case to scratch tests when we get to service.py testing. A good public PDF to test against: https://arxiv.org/pdf/1706.03762 (the Attention Is All You Need paper).

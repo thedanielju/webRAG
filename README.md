@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Give your LLM a research memory.</strong><br>
-  WebRAG indexes web pages and retrieves cited evidence so AI models can reason over real sources - not training data.
+  WebRAG indexes web pages and retrieves cited evidence, so AI models can reason over live sources instead of training data alone.
 </p>
 
 <p align="center">
@@ -23,15 +23,15 @@ WebRAG is a **Model Context Protocol (MCP)** server that turns web pages into se
 1. You ask your LLM a question and provide a URL
 2. The LLM calls WebRAG's `answer` tool via MCP
 3. WebRAG scrapes the page, chunks it, embeds it, and stores it in Postgres
-4. It retrieves the most relevant passages and can optionally follow links to expand the corpus
-5. The LLM receives cited evidence - verbatim quotes with source URLs - and reasons over it
+4. It retrieves the most relevant passages and can follow links to expand the corpus
+5. The LLM receives cited evidence (verbatim quotes with source URLs) and reasons over it
 
 **Why not just paste the page into the chat?**
 - Pages can be too large for context windows
-- Multi-page research requires following links and building a corpus over time
-- WebRAG handles chunking, embedding, retrieval, reranking, and citation extraction automatically
-- The corpus persists between conversations; ask follow-up questions without re-scraping
-- Higher quality, informed responses with rich html content and relevant image links. 
+- Multi-page research means following links and building a corpus over time
+- WebRAG handles chunking, embedding, retrieval, reranking, and citation extraction for you
+- The corpus persists between conversations, so you can ask follow-up questions without re-scraping
+- Answers stay grounded in the page's real HTML content, including tables and image links
 
 ---
 
@@ -39,14 +39,18 @@ WebRAG is a **Model Context Protocol (MCP)** server that turns web pages into se
 
 | Feature | Description |
 |---------|-------------|
-| **MCP Integration** | Three tools (`answer`, `search`, `status`) exposed via the Model Context Protocol. Fast defaults plus explicit deep/full-context controls. Every response includes an inline presentation guide and context-sensitive follow-up options for consistent output. Works with Claude Desktop, Cursor, and any MCP-compatible client. |
-| **Smart Corpus Expansion** | Default MCP behavior is no expansion for speed. Deep expansion is available on demand and uses link candidate scoring (URL heuristics, title/description relevance) to avoid low-yield crawls. |
+| **MCP Integration** | Three tools (`answer`, `search`, `status`) exposed via the Model Context Protocol. Fast defaults plus explicit deep and full-context controls. Every response includes an inline presentation guide and context-sensitive follow-up options for consistent output. Works with Claude Desktop, Cursor, and any MCP-compatible client. |
+| **Recursive Expansion** | `fast` mode (the default) does no expansion. `deep` mode genuinely recurses N levels (links of links), with the evaluator deciding how far to descend. Link candidates are scored on URL heuristics and title/description relevance to skip low-yield crawls, and each deep run reports the depth it reached and why it stopped. |
+| **Reachability + Coverage** | In `deep` mode WebRAG enumerates the seed's reachable page set via Firecrawl's `map` endpoint and reports how many of those pages it actually indexed, so you can see the corpus coverage behind an answer. |
+| **Two-Tier Stopping** | Quality drives the primary stop: an 11-rule decision matrix reads score distributions and halts on token saturation, plateau, or diminishing returns rather than a fixed depth. Hard safety backstops (page, token, and wall-clock ceilings) sit underneath so a public crawl cannot run away on your API credits. |
+| **Two Fetch Paths** | Firecrawl by default for JS-heavy pages and PDFs. A key-free raw-HTTP fetcher (httpx + BeautifulSoup) handles simple HTML pages with no Firecrawl account, and `INGESTION_PROVIDER=auto` falls back to it when no key is set. |
+| **Polite Crawling** | Both fetch paths respect `robots.txt` and apply a per-origin rate limit by default. |
 | **Semantic Chunking** | Splits pages by heading structure into parent/child chunks. Parents provide context; children are embedded for precise ANN search. |
 | **Rich Content Handling** | Preserves tables, code blocks, math (MathML → LaTeX), and images through HTML surface detection. The formatter converts these to clean, readable text for the model. |
-| **Provider-Agnostic Reranking** | Supports ZeroEntropy, Cohere, Jina, or no reranking. Dramatically improves result quality by rescoring passages with a cross-encoder. |
+| **Provider-Agnostic Reranking** | Supports ZeroEntropy, Cohere, Jina, or no reranking. Rescoring passages with a cross-encoder noticeably improves result quality. |
 | **Query Decomposition** | Complex questions are split into sub-queries (via LLM or rule-based patterns) and retrieved concurrently. Results are merged with MMR deduplication. |
-| **Citation Fidelity** | Verbatim quotes reconstructed from stored character offsets. No paraphrasing - every citation maps to exact source text. Citations are guaranteed in the token budget and never silently dropped. |
-| **Intelligent Stopping** | 11-rule decision matrix evaluates score distributions to decide when to stop expanding. Token budget saturation, plateau detection, and diminishing returns - not arbitrary depth limits. |
+| **Citation Fidelity** | Verbatim quotes reconstructed from stored character offsets, so every citation maps to exact source text with no paraphrasing. Citations are guaranteed in the token budget and never silently dropped. |
+| **Free / Local-Only Path** | Runs end to end with no paid keys: Ollama embeddings, the raw fetcher, rule-based decomposition, and no reranker. See the profile in `blank.env`. |
 | **Persistent Memory** | Indexed content lives in Postgres. Ask follow-up questions hours later without re-scraping. |
 
 ---
@@ -86,11 +90,11 @@ Copy the template and fill in your API keys:
 cp blank.env .env
 ```
 
-**Required keys:**
+**Recommended keys (shipped default, best quality):**
 
 | Key | What it's for | Where to get it |
 |-----|---------------|-----------------|
-| `FIRECRAWL_API_KEY` | Web scraping via Firecrawl | [firecrawl.dev](https://firecrawl.dev) |
+| `FIRECRAWL_API_KEY` | Web scraping via Firecrawl (JS-heavy pages, PDFs) | [firecrawl.dev](https://firecrawl.dev) |
 | `DATABASE_URL` | Postgres connection | Pre-filled for Docker setup |
 | `EMBEDDING_API_KEY` | Text embeddings | [OpenAI API keys](https://platform.openai.com/api-keys) |
 
@@ -100,6 +104,8 @@ cp blank.env .env
 |-----|---------------|--------------------|
 | `RERANKER_API_KEY` | Cross-encoder reranking | No reranking (embedding similarity only) |
 | `ORCHESTRATION_LLM_API_KEY` | LLM-based query decomposition | Falls back to rule-based decomposition |
+
+> **No Firecrawl key?** Set `INGESTION_PROVIDER=raw` (or leave it on `auto`) and WebRAG uses a key-free httpx + BeautifulSoup fetcher. It handles simple HTML pages well; Firecrawl is still the better choice for JS-heavy sites and PDFs. For a fully key-free setup (no Firecrawl, OpenAI, or reranker), see the **Free / local-only profile** in `blank.env`, and the note about matching the database vector dimension to your embedding model.
 
 ### 4. Connect to your MCP client
 
@@ -148,10 +154,12 @@ python -m src.mcp_server.server --transport streamable-http
 
 Scrapes a URL (if needed), decomposes your question, retrieves and reranks evidence, optionally expands to linked pages, and returns cited results.
 
-Default MCP behavior is optimized for responsiveness:
+Default MCP behavior is tuned for responsiveness:
 - chunked retrieval with guaranteed citations
 - no expansion unless explicitly requested
 - every response includes a `[PRESENTATION GUIDE]` (inline directives for the model) and `[FOLLOW-UP OPTIONS]` (context-sensitive next steps such as deep search, full context, or query refinement)
+
+In `deep` mode the response also reports the traversal: a `[SEARCH] depth N, stopped: <reason>` line (how many levels the recursion descended and why it halted) and a `[COVERAGE] indexed N of ~M reachable pages` line (how much of the seed's reachable page set was indexed).
 
 ```
 answer(
@@ -170,7 +178,7 @@ answer(
 | `intent` | `str` (optional) | Hint for the reranker (e.g. "compare", "explain", "find examples"). |
 | `known_context` | `str` (optional) | Context the model already has, to avoid redundant retrieval. |
 | `constraints` | `list[str]` (optional) | Hard constraints on what to include/exclude. |
-| `research_mode` | `str` (optional) | `fast`, `auto`, or `deep`. `fast` disables expansion by default. `deep` enables slower multi-page expansion from the start. |
+| `research_mode` | `str` (optional) | `fast`, `auto`, or `deep`. `fast` (default) does no expansion. `deep` runs genuine multi-level recursion (links of links), driven by the evaluator and bounded by the hard safety backstops. |
 | `retrieval_mode` | `str` (optional) | `chunk`, `full_context`, or `auto`. MCP defaults to `chunk` for better speed and citation visibility. |
 | `expansion_budget` | `int` (optional) | Max expansion iterations (overrides `MAX_EXPANSION_DEPTH`). Set to 0 to skip expansion. |
 
@@ -188,7 +196,7 @@ search(
 
 `search` also defaults to `chunk` mode so results stay compact and citations are more likely to survive the MCP response budget.
 
-### `status` — Corpus introspection
+### `status` - Corpus introspection
 
 Check what WebRAG has indexed:
 
@@ -202,6 +210,15 @@ status(source_url: "https://example.com")   # Specific URL
 ## Configuration Reference
 
 All settings live in `config.py` and can be overridden via environment variables in `.env`. See `blank.env` for a fully commented template.
+
+### Ingestion & Crawling
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `INGESTION_PROVIDER` | `auto` | `firecrawl`, `raw`, or `auto`. `firecrawl` always uses Firecrawl (needs a key); `raw` always uses the key-free httpx + BeautifulSoup fetcher; `auto` uses Firecrawl when `FIRECRAWL_API_KEY` is set, else falls back to raw. |
+| `RAW_FETCH_TIMEOUT_SECONDS` | `30` | Per-request timeout for the raw fetch path and for `robots.txt` fetches. |
+| `RESPECT_ROBOTS_TXT` | `true` | Honour `robots.txt` before fetching any URL on both fetch paths. Disallowed URLs are skipped and surfaced, never crashing the run. |
+| `CRAWL_RATE_LIMIT_RPS` | `1.0` | Max fetches per second to a single origin, enforced on both paths. Set to `0` to disable. |
 
 ### Embeddings
 
@@ -227,7 +244,7 @@ EMBEDDING_TOKENIZER_KIND=huggingface
 EMBEDDING_TOKENIZER_NAME=nomic-ai/nomic-embed-text-v1
 ```
 
-Local servers aren't rate-limited, so you can safely increase `EMBEDDING_MAX_WORKERS` to 8–12.
+Local servers aren't rate-limited, so you can safely increase `EMBEDDING_MAX_WORKERS` to 8-12.
 
 </details>
 
@@ -253,7 +270,7 @@ Local servers aren't rate-limited, so you can safely increase `EMBEDDING_MAX_WOR
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `RERANKER_PROVIDER` | `zeroentropy` | `zeroentropy`, `cohere`, `jina`, or `none`. |
-| `RERANKER_API_KEY` | — | API key for your chosen reranker provider. |
+| `RERANKER_API_KEY` | (none) | API key for your chosen reranker provider. |
 | `RERANKER_MODEL` | `zerank-2` | Model identifier (provider-specific). |
 | `RERANKER_TOP_N` | `20` | Max passages sent to the reranker per sub-query. |
 
@@ -264,7 +281,18 @@ Local servers aren't rate-limited, so you can safely increase `EMBEDDING_MAX_WOR
 | `DECOMPOSITION_MODE` | `llm` | `llm` (best quality), `rule_based` (no API calls), or `none`. |
 | `MAX_EXPANSION_DEPTH` | `5` | Hard cap on expansion iterations. |
 | `MAX_CANDIDATES_PER_ITERATION` | `5` | Links to scrape per expansion round. |
+| `REACHABILITY_ENABLED` | `true` | In `deep` mode, enumerate the seed's reachable page set via Firecrawl `map` and rank expansion candidates against it. Only runs in `deep` mode regardless of this flag; `fast` never maps. |
 | `LOCALITY_EXPANSION_ENABLED` | `true` | Grab sibling chunks adjacent to high-scoring hits. |
+
+### Safety Backstops (deep recursion)
+
+These bound worst-case spend and latency for genuine multi-level recursion. A normal run stops on quality (the evaluator) well before any of these trip; when one does, the loop halts and the run reports it as the stop reason. Defaults are intentionally conservative.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `MAX_PAGES_PER_ANSWER` | `25` | Max distinct pages indexed per answer (seed + expansion). |
+| `MAX_TOKENS_INDEXED_PER_ANSWER` | `200000` | Max content tokens indexed during expansion per answer. |
+| `ANSWER_WALLCLOCK_BUDGET_SECONDS` | `90` | Wall-clock budget for a single answer's run loop. |
 
 ### MCP Server
 
@@ -276,7 +304,7 @@ Local servers aren't rate-limited, so you can safely increase `EMBEDDING_MAX_WOR
 | `MCP_RESPONSE_TOKEN_BUDGET` | `30000` | Soft ceiling on response size. Higher = more evidence, more tokens. |
 | `MCP_DEFAULT_RESEARCH_MODE` | `fast` | Default MCP behavior. `fast` disables expansion unless explicitly requested. |
 | `MCP_DEFAULT_RETRIEVAL_MODE` | `chunk` | Default retrieval mode for MCP tools. Keeps responses smaller and improves citation visibility. |
-| `MCP_CITATIONS_RESERVED_TOKENS` | `1500` | Deprecated — citations are now guaranteed (never dropped). Kept for backward compatibility. |
+| `MCP_CITATIONS_RESERVED_TOKENS` | `1500` | Deprecated. Citations are now guaranteed (never dropped); kept for backward compatibility. |
 | `MCP_IMAGES_RESERVED_TOKENS` | `500` | Reserved response budget for `[IMAGES]`. |
 | `MCP_TOOL_TIMEOUT` | `120` | Seconds before the `answer` tool times out. |
 | `MCP_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, or `WARNING`. |
@@ -294,8 +322,10 @@ webRAG/
 │
 ├── src/
 │   ├── 01_ingestion/           # Layer 1: Web scraping and content extraction
-│   │   ├── service.py          #   Top-level ingest(url) → NormalizedDocument
-│   │   ├── firecrawl_client.py #   Firecrawl API wrapper
+│   │   ├── service.py          #   Top-level ingest(url) → NormalizedDocument; provider selection
+│   │   ├── firecrawl_client.py #   Firecrawl API wrapper (scrape + map)
+│   │   ├── raw_fetch_client.py #   Key-free httpx + BeautifulSoup fetcher
+│   │   ├── politeness.py       #   robots.txt checks + per-origin rate limiting
 │   │   └── links.py            #   URL normalization and dedup
 │   │
 │   ├── 02_indexing/            # Layer 2: Chunking, embedding, storage
@@ -327,7 +357,10 @@ webRAG/
 │       ├── html_converter.py   #   HTML → readable plain text
 │       └── errors.py           #   Error response templates
 │
-├── tests/                      # Unit and integration tests (~170 tests)
+├── tests/                      # Unit and integration tests
+├── scripts/
+│   └── smoke_free_path.py      # End-to-end smoke test for the free/local path
+├── .github/workflows/ci.yml    # GitHub Actions: install + non-live pytest
 ├── docs/
 │   └── architecture.md         # Detailed architecture documentation
 └── specs/                      # Design specifications

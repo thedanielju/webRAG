@@ -1,4 +1,4 @@
-# WebRAG v1.0 — Public Release Plan
+# WebRAG v1.0: Public Release Plan
 
 Status: approved scope, execution in progress. Direct commits to `main`. Two human gates:
 (1) before `git push` to the public GitHub remote, (2) before tagging `v1.0.0`.
@@ -21,7 +21,7 @@ Shipped default config stays paid/best-quality (Firecrawl + OpenAI). Firecrawl `
 
 ---
 
-## Phase 1 — Reachability frontier + coverage
+## Phase 1: Reachability frontier + coverage
 
 Objective: orchestration enumerates the reachable page universe from the seed via `firecrawl_client.map()`, draws expansion candidates from it, and reports coverage.
 
@@ -33,11 +33,11 @@ Objective: orchestration enumerates the reachable page universe from the seed vi
 | `src/05_mcp_server/formatter.py` | Surface coverage in the response (e.g. a `[COVERAGE]` line: "indexed 12 of ~40 reachable pages"). |
 | `config.py` + `blank.env` | Confirm `firecrawl_map_default_limit`; add `REACHABILITY_ENABLED` (default true, deep-only) and map-cache TTL if needed. |
 
-Tests: fix `tests/test_firecrawl_client.py::test_firecrawl_map_smoke` to call `firecrawl_client.map(url)`. Add unit tests for frontier dedup/normalization and coverage math (mock the map call — no live network in CI).
+Tests: fix `tests/test_firecrawl_client.py::test_firecrawl_map_smoke` to call `firecrawl_client.map(url)`. Add unit tests for frontier dedup/normalization and coverage math (mock the map call; no live network in CI).
 Acceptance: `pytest tests/test_orchestration_unit.py tests/test_firecrawl_client.py -q` green (live smoke may be marked/skipped in CI).
 Judgment level: creative (candidate-universe design touches scoring).
 
-## Phase 2 — Multi-level recursion + two-tier stop
+## Phase 2: Multi-level recursion + two-tier stop
 
 Objective: genuine N-level recursive expansion driven by the evaluator, reachable through MCP `deep` mode; conservative hard safety backstops.
 
@@ -52,7 +52,7 @@ Tests: extend `tests/test_orchestration_unit.py` with multi-level descent cases 
 Acceptance: `pytest tests/test_orchestration_unit.py tests/test_orchestration_integration.py -q`.
 Judgment level: creative.
 
-## Phase 3 — Raw-HTTP fetch fallback + robots + rate limiting
+## Phase 3: Raw-HTTP fetch fallback + robots + rate limiting
 
 Objective: ingest without a Firecrawl key; re-enable LaTeX; be a polite crawler on both paths.
 
@@ -68,15 +68,15 @@ Tests: new `tests/test_raw_fetch.py` (mock httpx), robots parsing tests, LaTeX-f
 Acceptance: `pytest tests/test_raw_fetch.py tests/test_service.py tests/test_chunker_images.py -q`.
 Judgment level: routine→creative (NormalizedDocument parity and robots edge cases need care).
 
-## Phase 4 — Free/local path wiring + verification
+## Phase 4: Free/local path wiring + verification
 
 Objective: prove an end-to-end answer using only free components.
 
-Free config: `EMBEDDING_BASE_URL=http://localhost:11434/v1`, `EMBEDDING_MODEL=nomic-embed-text`, `EMBEDDING_DIMENSIONS=768`, huggingface tokenizer; `RERANKER_PROVIDER=none`; `DECOMPOSITION_MODE=rule_based`; `INGESTION_PROVIDER=raw`. Verify dimension handling (schema is 1536 by default — confirm reindex/dimension switch works or document the constraint).
+Free config: `EMBEDDING_BASE_URL=http://localhost:11434/v1`, `EMBEDDING_MODEL=nomic-embed-text`, `EMBEDDING_DIMENSIONS=768`, huggingface tokenizer; `RERANKER_PROVIDER=none`; `DECOMPOSITION_MODE=rule_based`; `INGESTION_PROVIDER=raw`. Verify dimension handling (schema is 1536 by default; confirm reindex/dimension switch works or document the constraint).
 Acceptance (live, local-only, no paid keys): a real `answer()` returns correct citations. Documented as a `blank.env` profile block.
 Judgment level: routine.
 
-## Phase 5 — GitHub Actions CI
+## Phase 5: GitHub Actions CI
 
 Objective: clean-checkout install + full non-live pytest on every push.
 
@@ -84,9 +84,9 @@ Objective: clean-checkout install + full non-live pytest on every push.
 Acceptance: workflow green on a test push (gate: do not push to public remote without sign-off).
 Judgment level: routine.
 
-## Phase 6 — Docs scrub + LICENSE + README/specs + version bump (LAST)
+## Phase 6: Docs scrub + LICENSE + README/specs + version bump (LAST)
 
-Natural-sounding human edit (not a regex purge) of all tracked/shipping markdown: `README.md`, `docs/*.md`, `SECURITY.md`, `specs/*.md`. Blocklist: em/en dashes (— –), "not X but Y" reframes, rule-of-three triads, AI-vocab tells (delve, leverage, seamless, robust, comprehensive, boasts, "it's worth noting", "plays a crucial role", "a testament to"), hype adjectives, bold-overuse, "let's dive in"/"in conclusion". Keep the single 🌐 title emoji + badges; strip other emoji. Light-touch on code comments only. Leave gitignored `agent_documentation/` alone.
+Natural-sounding human edit (not a regex purge) of all tracked/shipping markdown: `README.md`, `docs/*.md`, `SECURITY.md`, `specs/*.md`. Blocklist: em dashes and en dashes, "not X but Y" reframes, rule-of-three triads, AI-vocab tells (delve, leverage, seamless, robust, comprehensive, boasts, "it's worth noting", "plays a crucial role", "a testament to"), hype adjectives, bold-overuse, "let's dive in"/"in conclusion". Keep the single 🌐 title emoji + badges; strip other emoji. Light-touch on code comments only. Leave gitignored `agent_documentation/` alone.
 Plus: add `LICENSE` (MIT, copyright "Daniel Ju"); document recursion/reachability/raw-fetch/robots/free-path and all new config keys in README + config reference; bump `pyproject.toml` version to `1.0.0`.
 Acceptance: docs read naturally; `git grep -nP "[—–]"` over tracked markdown returns only intentional cases; full suite green.
 

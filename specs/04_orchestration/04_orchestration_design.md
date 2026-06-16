@@ -1,9 +1,9 @@
-# WebRAG Orchestration Layer — Design Document
+# WebRAG Orchestration Layer - Design Document
 
 > **Version:** 1.0  
 > **Date:** 2026-02-21  
 > **Status:** Ready for implementation  
-> **Scope:** Orchestration layer design — the coordination brain between MCP tool calls and the ingestion/indexing/retrieval layers.
+> **Scope:** Orchestration layer design: the coordination brain between MCP tool calls and the ingestion/indexing/retrieval layers.
 
 ---
 
@@ -28,17 +28,17 @@
 
 ## 1. Purpose & Role
 
-The orchestration layer is the **coordination brain** of WebRAG. It sits between MCP tool calls (incoming requests from a reasoning LLM) and the three existing layers (ingestion, indexing, retrieval). It does NOT perform reasoning or answer synthesis — it produces evidence + citations for the LLM to use.
+The orchestration layer is the **coordination brain** of WebRAG. It sits between MCP tool calls (incoming requests from a reasoning LLM) and the three existing layers (ingestion, indexing, retrieval). It does NOT perform reasoning or answer synthesis; it produces evidence + citations for the LLM to use.
 
 ### Responsibilities
 
-1. **Corpus management** — ensure requested URLs are ingested and indexed before retrieval.
-2. **Query analysis** — decompose complex queries, classify intent, estimate complexity.
-3. **Retrieve-evaluate-expand loop** — call retrieval, evaluate result quality via reranking, decide whether and how to expand, execute expansion, re-retrieve until stopping conditions are met.
-4. **Reranking** — apply cross-encoder reranking to calibrate relevance scores from retrieval.
-5. **Locality expansion** — grab adjacent chunks around high-scoring hits for fuller context.
-6. **Citation assembly** — produce structured citation metadata from retrieved chunks.
-7. **Output assembly** — produce a rich structured payload for the MCP layer to format and return.
+1. **Corpus management:** ensure requested URLs are ingested and indexed before retrieval.
+2. **Query analysis:** decompose complex queries, classify intent, estimate complexity.
+3. **Retrieve-evaluate-expand loop:** call retrieval, evaluate result quality via reranking, decide whether and how to expand, execute expansion, re-retrieve until stopping conditions are met.
+4. **Reranking:** apply cross-encoder reranking to calibrate relevance scores from retrieval.
+5. **Locality expansion:** grab adjacent chunks around high-scoring hits for fuller context.
+6. **Citation assembly:** produce structured citation metadata from retrieved chunks.
+7. **Output assembly:** produce a rich structured payload for the MCP layer to format and return.
 
 ### What It Does NOT Do
 
@@ -80,7 +80,7 @@ The orchestration layer is the **coordination brain** of WebRAG. It sits between
 - The `openai` SDK is reused for query analysis LLM calls (gpt-4o-mini default). It shares the same SDK as the embedding client but uses a separate client instance pointed at the orchestration LLM endpoint (which may differ from the embedding endpoint).
 - ZeroEntropy SDK provides `AsyncZeroEntropy` with async methods mirroring the sync client. Use `zclient.models.rerank()` for standalone reranking.
 - Cohere SDK provides `AsyncClientV2` (or equivalent) with `rerank()`.
-- Jina Reranker is accessed via HTTP API — use `httpx.AsyncClient` or the `jina` SDK if available.
+- Jina Reranker is accessed via HTTP API; use `httpx.AsyncClient` or the `jina` SDK if available.
 
 ---
 
@@ -104,7 +104,7 @@ decomposition_mode: str = "llm"
 # ── Orchestration: Reranking ──────────────────────────────────────
 reranker_provider: str = "zeroentropy"
 # Valid values: "zeroentropy" | "cohere" | "jina" | "none"
-# - "zeroentropy": ZeroEntropy zerank-2. Calibrated 0–1 scores, instruction-
+# - "zeroentropy": ZeroEntropy zerank-2. Calibrated 0-1 scores, instruction-
 #   following, confidence scores. $0.025/1M tokens. Recommended default.
 # - "cohere": Cohere Rerank v3.5. ~$1/1000 queries.
 # - "jina": Jina Reranker v2. Free tier available.
@@ -150,7 +150,7 @@ redundancy_ceiling: float = 0.85
 # filtered as redundant. Used in MMR-style deduplication.
 score_cliff_threshold: float = 0.15
 # Score gap between rank-1 and rank-K chunk. A cliff above this value
-# indicates narrow relevance — one strong hit but thin coverage.
+# indicates narrow relevance; one strong hit but thin coverage.
 score_cliff_rank_k: int = 5
 # Which rank to compare against rank-1 for cliff detection.
 plateau_variance_threshold: float = 0.02
@@ -212,15 +212,15 @@ src/
 │   ├── locality.py          # Adjacent chunk expansion
 │   ├── merger.py            # Multi-subquery result merging & MMR deduplication
 │   └── models.py            # Orchestration-specific Pydantic models
-├── ingestion/               # Existing — scrape, discover_links, map_site
-├── indexing/                 # Existing — index_batch, embedder, chunker
-├── retrieval/               # Existing — retrieve, search, citations, models
+├── ingestion/               # Existing: scrape, discover_links, map_site
+├── indexing/                 # Existing: index_batch, embedder, chunker
+├── retrieval/               # Existing: retrieve, search, citations, models
 └── config.py                # Extended with orchestration settings
 ```
 
 ### Module Responsibilities
 
-#### `engine.py` — OrchestratorEngine
+#### `engine.py`: OrchestratorEngine
 
 The top-level entry point. Owns the full orchestration lifecycle for a single request.
 
@@ -254,7 +254,7 @@ class OrchestratorEngine:
         ...
 ```
 
-#### `query_analyzer.py` — Query Analysis & Decomposition
+#### `query_analyzer.py`: Query Analysis & Decomposition
 
 Handles query understanding before retrieval begins.
 
@@ -317,7 +317,7 @@ Given a user query, produce a JSON object with:
 Respond with ONLY the JSON object, no other text."""
 ```
 
-#### `reranker.py` — Modular Reranker Abstraction
+#### `reranker.py`: Modular Reranker Abstraction
 
 Provider-agnostic reranking interface.
 
@@ -325,7 +325,7 @@ Provider-agnostic reranking interface.
 class RerankResult(BaseModel):
     """Single reranked result."""
     index: int                      # Original position in input list
-    relevance_score: float          # 0.0–1.0, calibrated for zerank-2
+    relevance_score: float          # 0.0-1.0, calibrated for zerank-2
     confidence: float | None = None # ZeroEntropy-specific confidence score
 
 async def rerank(
@@ -382,7 +382,7 @@ def _passthrough_rerank(passages: list[str],
     ...
 ```
 
-#### `evaluator.py` — Retrieval Quality Evaluation
+#### `evaluator.py`: Retrieval Quality Evaluation
 
 Analyzes reranked results and decides: stop, or which type of expansion to perform.
 
@@ -409,11 +409,11 @@ class ExpansionDecision(BaseModel):
     """The evaluator's recommendation."""
     action: str
     # Valid values:
-    #   "stop"            — sufficient coverage, return results
-    #   "expand_breadth"  — follow more outgoing links, scrape new pages
-    #   "expand_recall"   — adjust retrieval params (lower threshold, higher k)
-    #   "expand_intent"   — rewrite/decompose query, try alternative phrasings
-    #   "expand_locality" — fetch adjacent chunks (handled separately, always runs)
+    #   "stop"            - sufficient coverage, return results
+    #   "expand_breadth"  - follow more outgoing links, scrape new pages
+    #   "expand_recall"   - adjust retrieval params (lower threshold, higher k)
+    #   "expand_intent"   - rewrite/decompose query, try alternative phrasings
+    #   "expand_locality" - fetch adjacent chunks (handled separately, always runs)
     reason: str               # Human-readable explanation for the log
     confidence: str           # "high" | "medium" | "low"
 
@@ -464,7 +464,7 @@ def _compute_redundancy(
     ...
 ```
 
-#### `expander.py` — Link Scoring & Expansion Execution
+#### `expander.py`: Link Scoring & Expansion Execution
 
 Handles candidate discovery, scoring, and expansion execution.
 
@@ -478,15 +478,15 @@ async def score_candidates(
     """Score link candidates for expansion relevance.
     
     Scoring signals (combined as weighted sum):
-    1. URL path relevance (0.0–1.0): Token overlap between URL path
+    1. URL path relevance (0.0-1.0): Token overlap between URL path
        segments and query key_concepts. Weight: 0.15
-    2. Title relevance (0.0–1.0): If title available (from /map enrichment),
+    2. Title relevance (0.0-1.0): If title available (from /map enrichment),
        token overlap or embedding similarity with query. Weight: 0.40
-    3. Description relevance (0.0–1.0): If description available,
+    3. Description relevance (0.0-1.0): If description available,
        token overlap with query. Weight: 0.30
-    4. In-degree signal (0.0–1.0): Normalized count of how many
+    4. In-degree signal (0.0-1.0): Normalized count of how many
        already-ingested pages link to this candidate URL. Weight: 0.05
-    5. Depth penalty (0.0–1.0): Decay by candidate depth. Weight: 0.10
+    5. Depth penalty (0.0-1.0): Decay by candidate depth. Weight: 0.10
     
     Candidates already in already_ingested_urls are excluded.
     Returns sorted by score descending.
@@ -544,12 +544,12 @@ def _derive_parent_urls(url: str) -> list[str]:
     
     Excludes the root domain itself (too generic).
     These are added to the candidate pool and scored alongside
-    link-discovered candidates — no special priority boost.
+    link-discovered candidates, with no special priority boost.
     """
     ...
 ```
 
-#### `locality.py` — Adjacent Chunk Expansion
+#### `locality.py`: Adjacent Chunk Expansion
 
 ```python
 async def expand_locality(
@@ -567,13 +567,13 @@ async def expand_locality(
     2. Exclude chunks already in the result set.
     3. Return new chunks with a flag indicating locality-expanded origin.
     
-    This is a cheap DB query — no embedding or API calls.
+    This is a cheap DB query, no embedding or API calls.
     Runs after every retrieval, before final output assembly.
     """
     ...
 ```
 
-#### `merger.py` — Result Merging & Deduplication
+#### `merger.py`: Result Merging & Deduplication
 
 ```python
 async def merge_subquery_results(
@@ -607,7 +607,7 @@ class RankedChunk(BaseModel):
     source_sub_query: str | None = None
 ```
 
-#### `models.py` — Orchestration-Specific Models
+#### `models.py`: Orchestration-Specific Models
 
 ```python
 class OrchestrationResult(BaseModel):
@@ -962,8 +962,8 @@ The retrieval layer and reranker serve complementary roles in a funnel:
 
 | Layer | Purpose | Scale | Speed |
 |-------|---------|-------|-------|
-| Retrieval | **Recall** — find candidate chunks from thousands via HNSW | O(log n) | ~900ms |
-| Reranker | **Precision** — re-score 20-40 candidates with cross-encoder | O(k) per pair | ~200ms |
+| Retrieval | **Recall:** find candidate chunks from thousands via HNSW | O(log n) | ~900ms |
+| Reranker | **Precision:** re-score 20-40 candidates with cross-encoder | O(k) per pair | ~200ms |
 
 Retrieval's depth decay, parent dedup, surface selection, token budget enforcement, full-context mode switching, and at-least-one guarantee all remain essential. The reranker only re-scores the relevance ordering within the set retrieval already assembled.
 
@@ -972,7 +972,7 @@ Retrieval's depth decay, parent dedup, surface selection, token budget enforceme
 1. **Calibrated scores**: A score of 0.8 ≈ 80% relevance, consistently. This makes absolute thresholds meaningful for stopping criteria.
 2. **Instruction-following**: Pass MCP intent hints and constraints directly into the reranker instruction field for context-aware scoring.
 3. **Confidence scores**: Per-result confidence measure. Low average confidence across results signals the corpus may not contain relevant content.
-4. **Cost**: $0.025 per 1M tokens — negligible for 20-40 chunks per query.
+4. **Cost**: $0.025 per 1M tokens; negligible for 20-40 chunks per query.
 
 ### Provider Interface
 
@@ -998,7 +998,7 @@ After each reranking, the evaluator computes these signals from the reranked sco
 | `redundancy_ratio` | Fraction of chunks flagged as near-duplicate | Content repetition level |
 | `source_document_count` | Distinct source URLs | Breadth of evidence |
 | `avg_confidence` | Mean zerank-2 confidence (if available) | Reranker's self-assessed certainty |
-| `chunks_above_threshold` | Count above `(top_score - δ)` | Recall proxy — how many "good" chunks |
+| `chunks_above_threshold` | Count above `(top_score - δ)` | Recall proxy: how many "good" chunks |
 
 ### Decision Matrix
 
@@ -1054,7 +1054,7 @@ The evaluator compares current signals against `previous_signals` to detect:
 
 ### Score Normalization
 
-When using raw embedding similarity (reranker_provider="none"), scores are not calibrated — 0.6 might mean "good" in one query and "mediocre" in another. In this mode:
+When using raw embedding similarity (reranker_provider="none"), scores are not calibrated; 0.6 might mean "good" in one query and "mediocre" in another. In this mode:
 
 - Absolute thresholds (mediocre_score_floor, confidence_floor) should be lowered. Use `mediocre_score_floor=0.35` instead of 0.5.
 - Relative signals (cliff, variance, plateau) remain reliable regardless of calibration.
@@ -1099,11 +1099,11 @@ score = (0.15 × url_path_relevance) +
 
 | Signal | Range | How Computed |
 |--------|-------|-------------|
-| `url_path_relevance` | 0.0–1.0 | Jaccard overlap between URL path tokens (split on `/`, `-`, `_`) and `query_analysis.key_concepts` |
-| `title_relevance` | 0.0–1.0 | Token overlap between link candidate title and query. 0.0 if title is None (un-enriched). |
-| `description_relevance` | 0.0–1.0 | Token overlap between link candidate description and query. 0.0 if None. |
-| `in_degree_signal` | 0.0–1.0 | `min(1.0, in_degree / 5)` where in_degree = count of distinct source documents in link_candidates that point to this target URL. |
-| `depth_freshness` | 0.0–1.0 | `max(0.0, 1.0 - candidate.depth * 0.2)`. Prefers shallower candidates. |
+| `url_path_relevance` | 0.0-1.0 | Jaccard overlap between URL path tokens (split on `/`, `-`, `_`) and `query_analysis.key_concepts` |
+| `title_relevance` | 0.0-1.0 | Token overlap between link candidate title and query. 0.0 if title is None (un-enriched). |
+| `description_relevance` | 0.0-1.0 | Token overlap between link candidate description and query. 0.0 if None. |
+| `in_degree_signal` | 0.0-1.0 | `min(1.0, in_degree / 5)` where in_degree = count of distinct source documents in link_candidates that point to this target URL. |
+| `depth_freshness` | 0.0-1.0 | `max(0.0, 1.0 - candidate.depth * 0.2)`. Prefers shallower candidates. |
 
 **When candidates lack title/description** (un-enriched, only URL available): the title and description weights (0.40 + 0.30 = 0.70) effectively become 0. This heavily penalizes un-enriched candidates, which incentivizes calling `enrich_link_candidates()` before scoring. However, if enrichment is skipped (e.g., to save credits), URL path relevance and in-degree still provide some signal.
 
@@ -1253,7 +1253,7 @@ This produces full-chunk citations. The MCP layer can extract shorter verbatim s
 
 | Scenario | Handling |
 |----------|---------|
-| **Scrape fails** (Firecrawl error, rate limit, 4xx/5xx) | Log failure, skip URL, continue with remaining candidates. Track in `ExpansionOutcome.urls_failed`. Do NOT retry in same iteration — failed URLs are excluded from future candidate pools. |
+| **Scrape fails** (Firecrawl error, rate limit, 4xx/5xx) | Log failure, skip URL, continue with remaining candidates. Track in `ExpansionOutcome.urls_failed`. Do NOT retry in same iteration; failed URLs are excluded from future candidate pools. |
 | **Embedding API fails** | Retry once with backoff. If still fails, return partial results with error flag. Do NOT expand further. |
 | **Reranker API fails** | Fall back to `_passthrough_rerank()` (preserve retrieval ordering). Log warning. Stopping criteria operate on raw similarity scores with adjusted thresholds. |
 | **Orchestration LLM fails** | Fall back to `_rule_based_decompose()`. Log warning. |
@@ -1356,13 +1356,13 @@ The primary tool exposed to reasoning LLMs:
 
 The MCP layer receives `OrchestrationResult` and is responsible for:
 
-1. **Formatting context blocks** — Assembling the actual text payload the LLM will read from `chunks[].chunk.selected_text`.
+1. **Formatting context blocks:** Assembling the actual text payload the LLM will read from `chunks[].chunk.selected_text`.
 
-2. **Citation formatting** — Converting `CitationSpan` objects into the two-layer citation format:
-   - **Reference layer**: `[1] Title — URL § Section Heading`
+2. **Citation formatting:** Converting `CitationSpan` objects into the two-layer citation format:
+   - **Reference layer**: `[1] Title - URL § Section Heading`
    - **Evidence layer**: Verbatim snippet from `citation.verbatim_text`
 
-3. **ASCII traversal diagram** — Rendering `expansion_steps` into a visual tree for the model response. URLs truncated to show only the distinguishing path segment:
+3. **ASCII traversal diagram:** Rendering `expansion_steps` into a visual tree for the model response. URLs truncated to show only the distinguishing path segment:
    ```
    /ensemble.html (seed, score: 0.63)
    ├── /gradient_boosting.html (depth 1, score: 0.71)
@@ -1371,15 +1371,15 @@ The MCP layer receives `OrchestrationResult` and is responsible for:
    └── /modules/ (parent, score: 0.42) [skipped: low relevance]
    ```
 
-4. **Timing/stats summary** — Human-readable performance breakdown from `OrchestrationTiming`.
+4. **Timing/stats summary:** Human-readable performance breakdown from `OrchestrationTiming`.
 
-5. **Error/warning surfacing** — Communicating partial results, degraded components, or timeout situations to the reasoning model.
+5. **Error/warning surfacing:** Communicating partial results, degraded components, or timeout situations to the reasoning model.
 
 ### Additional MCP Tools (Future Consideration)
 
 | Tool | Purpose | Priority |
 |------|---------|----------|
-| `answer` | Primary tool — full orchestration pipeline | v1 |
+| `answer` | Primary tool: full orchestration pipeline | v1 |
 | `search_corpus` | Query existing indexed content without expansion | v2 |
 | `ingest` | Explicitly ingest a URL without querying | v2 |
 | `corpus_status` | Return stats about what's indexed | v2 |
@@ -1419,7 +1419,7 @@ Expansion iterations: {total_iterations}
 Total time: {timing.total_ms:.0f}ms
 ```
 
-The exact formatting is the MCP layer's decision — orchestration provides all the raw materials.
+The exact formatting is the MCP layer's decision; orchestration provides all the raw materials.
 
 ---
 
@@ -1427,22 +1427,22 @@ The exact formatting is the MCP layer's decision — orchestration provides all 
 
 Recommended implementation sequence for the agent:
 
-1. **`models.py`** — All Pydantic models first (OrchestrationResult, ExpansionStep, QueryAnalysis, RankedChunk, EvaluationSignals, ExpansionDecision, etc.). These define all data contracts.
+1. **`models.py`:** All Pydantic models first (OrchestrationResult, ExpansionStep, QueryAnalysis, RankedChunk, EvaluationSignals, ExpansionDecision, etc.). These define all data contracts.
 
-2. **`reranker.py`** — Modular reranker abstraction. Can be tested independently with mock data.
+2. **`reranker.py`:** Modular reranker abstraction. Can be tested independently with mock data.
 
-3. **`query_analyzer.py`** — Query analysis with all three modes. Can be tested independently.
+3. **`query_analyzer.py`:** Query analysis with all three modes. Can be tested independently.
 
-4. **`evaluator.py`** — Stopping criteria logic. Testable with synthetic score distributions.
+4. **`evaluator.py`:** Stopping criteria logic. Testable with synthetic score distributions.
 
-5. **`locality.py`** — Adjacent chunk expansion. Simple DB queries, testable in isolation.
+5. **`locality.py`:** Adjacent chunk expansion. Simple DB queries, testable in isolation.
 
-6. **`expander.py`** — Link scoring and expansion execution. Depends on link_candidates table (already implemented).
+6. **`expander.py`:** Link scoring and expansion execution. Depends on link_candidates table (already implemented).
 
-7. **`merger.py`** — Result merging and MMR deduplication.
+7. **`merger.py`:** Result merging and MMR deduplication.
 
-8. **`engine.py`** — Main orchestration loop. Integrates all modules. Integration tested.
+8. **`engine.py`:** Main orchestration loop. Integrates all modules. Integration tested.
 
-9. **Config additions** — Add new settings to config.py and .env.
+9. **Config additions:** Add new settings to config.py and .env.
 
-10. **Tests** — Unit tests for each module, integration test for full pipeline.
+10. **Tests:** Unit tests for each module, integration test for full pipeline.

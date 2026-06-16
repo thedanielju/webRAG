@@ -68,9 +68,9 @@ discover_links(url):
 these fields will be None (not requested): actions, branding, change_tracking, json, raw_html, screenshot, summary, images
 
 # map(url) returns a plain Python list of LinkResult objects, each with:
-1. url — always present
-2. title — optional, may be None
-3. description — optional, may be None
+1. url: always present
+2. title: optional, may be None
+3. description: optional, may be None
 
 Added by ingestion:
 - fetched_at (timestamp)

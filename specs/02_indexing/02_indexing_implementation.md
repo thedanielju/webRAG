@@ -49,20 +49,20 @@ python-dotenv       # env var loading
 
 ### Outline
 src/indexing/
-├── models.py     # Dataclasses — Chunk, ChunkLevel enum, RichContentFlags
-├── schema.py     # CREATE TABLE / CREATE INDEX — called programmatically with IF NOT EXISTS guard
+├── models.py     # Dataclasses: Chunk, ChunkLevel enum, RichContentFlags
+├── schema.py     # CREATE TABLE / CREATE INDEX, called programmatically with IF NOT EXISTS guard
 ├── chunker.py    # Parent-child splitting logic. does flag detection as well: finding <table>, $$, etc
-├── embedder.py   # Embedding + tokenization — accepts list of texts, returns list of vectors + token offsets
-└── indexer.py    # Entry point — index_document() and index_batch(), wires everything together, stores, handles dedup. 
+├── embedder.py   # Embedding + tokenization: accepts list of texts, returns list of vectors + token offsets
+└── indexer.py    # Entry point: index_document() and index_batch(), wires everything together, stores, handles dedup. 
 
 root/
-├── config.py     # Pydantic config — DB, embedding provider, model, dims, tokenizer
+├── config.py     # Pydantic config: DB, embedding provider, model, dims, tokenizer
 
 ## Module Notes
 # Async
-All indexing functions are regular def — not async def. The ingestion layer uses the sync Firecrawl client and its entry points are regular def. Indexing matches this. If a future async caller (e.g. MCP server) needs to call indexing, it wraps via asyncio.to_thread() at that boundary. Do not introduce asyncio inside the indexing layer.
+All indexing functions are regular def, not async def. The ingestion layer uses the sync Firecrawl client and its entry points are regular def. Indexing matches this. If a future async caller (e.g. MCP server) needs to call indexing, it wraps via asyncio.to_thread() at that boundary. Do not introduce asyncio inside the indexing layer.
 
-Concurrency within indexing uses stdlib concurrent.futures.ThreadPoolExecutor — this is compatible with regular def functions and does not require asyncio. Threads are used for two purposes:
+Concurrency within indexing uses stdlib concurrent.futures.ThreadPoolExecutor, which is compatible with regular def functions and does not require asyncio. Threads are used for two purposes:
 1. embed_texts() fans out HTTP embedding requests across EMBEDDING_MAX_WORKERS threads
 2. index_batch() overlaps chunking (main thread) with embedding (background thread) for multi-doc batches
 
@@ -71,11 +71,11 @@ embedder.py splits the full text list into batches of EMBEDDING_BATCH_SIZE (defa
 
 Batch size rationale: 256 texts per request balances HTTP overhead (fewer requests) against per-request latency and memory. OpenAI's embedding endpoint handles payloads up to ~8M tokens, so 256 chunks of ~256 tokens each (~65K tokens) is well within limits while keeping individual request latency manageable (~10-12s).
 
-Worker count rationale: Default 4 is conservative to avoid 429 rate-limit errors on lower OpenAI API tiers (free/tier-1 typically allow 60-200 RPM). Paid plans with higher RPM allowances can safely increase to 8-12. Local embedding servers (Ollama, LM Studio) have no rate limits — the practical ceiling is CPU/GPU core count.
+Worker count rationale: Default 4 is conservative to avoid 429 rate-limit errors on lower OpenAI API tiers (free/tier-1 typically allow 60-200 RPM). Paid plans with higher RPM allowances can safely increase to 8-12. Local embedding servers (Ollama, LM Studio) have no rate limits; the practical ceiling is CPU/GPU core count.
 
 Both values are configurable via EMBEDDING_BATCH_SIZE and EMBEDDING_MAX_WORKERS in config.py / .env.
 
-Failure handling: if any single batch raises (timeout, 429, network error, dimension mismatch), the exception propagates immediately and fails the entire embed_texts() call. No partial results are returned. index_batch() treats embedding as all-or-nothing — partial vectors would leave chunks in an inconsistent state.
+Failure handling: if any single batch raises (timeout, 429, network error, dimension mismatch), the exception propagates immediately and fails the entire embed_texts() call. No partial results are returned. index_batch() treats embedding as all-or-nothing; partial vectors would leave chunks in an inconsistent state.
 
 # Chunking/Embedding Overlap
 For multi-doc index_batch() calls, chunking of subsequent documents proceeds in the main thread while embedding of already-chunked documents runs in a single background thread. This is safe because:
@@ -83,7 +83,7 @@ For multi-doc index_batch() calls, chunking of subsequent documents proceeds in 
 - embed_texts() operates on an independent list of strings, no shared mutable state
 - The background thread's embed_texts() internally fans out to its own ThreadPoolExecutor
 
-For single-document calls (index_document), the overlap adds no benefit and is skipped — embed_texts() is called synchronously.
+For single-document calls (index_document), the overlap adds no benefit and is skipped; embed_texts() is called synchronously.
 
 # DB Write Performance
 _insert_chunks uses cursor.executemany() instead of per-row cursor.execute() loops. executemany sends the parameterised INSERT once and streams all row data in a single client-server round-trip, reducing Phase 3 write time from ~3s to <0.5s for 1000+ chunk batches. The semantic behaviour is identical: one INSERT per chunk, same column set, same parameter mapping.
@@ -102,7 +102,7 @@ For a single average page (50-150 chunks): ~3-5s total.
 schema.py called programmatically with IF NOT EXISTS guard, not a standalone migration script. schema.py is not a standalone migration script. It exposes an init_schema(conn) function that runs CREATE TABLE IF NOT EXISTS and CREATE INDEX IF NOT EXISTS for all tables and indexes. indexer.py calls this once at startup before any indexing operations.
 
 # HTML Parser
-BS4 with lxml as the backend parser for rich content flag detection. Fallback to html.parser (stdlib) on parse errors. Pattern matching on markdown (via re) handles code fences, admonitions (Firecrawl's bare keyword format), tables, and ordered lists. bs4 handles all HTML-specific patterns — math (MathML/MathJax), definition lists (`<dl>`), admonitions (CSS classes), and tables.
+BS4 with lxml as the backend parser for rich content flag detection. Fallback to html.parser (stdlib) on parse errors. Pattern matching on markdown (via re) handles code fences, admonitions (Firecrawl's bare keyword format), tables, and ordered lists. bs4 handles all HTML-specific patterns: math (MathML/MathJax), definition lists (`<dl>`), admonitions (CSS classes), and tables.
 
 # Rich Content Detection Rules
 Detection rules updated after auditing real Firecrawl output (Feb 2026). Firecrawl strips LaTeX and does not produce markdown definition-list syntax. Detection relies on HTML for math, definition lists, and (primarily) admonitions.
@@ -115,7 +115,7 @@ Detection rules updated after auditing real Firecrawl output (Feb 2026). Firecra
   - HTML only: `<dl><dt><dd>`
   - Markdown: no detection (Firecrawl does not produce definition-list syntax)
 - Admonitions:
-  - Markdown: bare keyword line (`Note`, `Warning`, `Important`, `Tip`, `Caution`, `Danger`, `Info`, `Success`, `Example`, `See also`, `Deprecated since`) — matches Firecrawl's actual rendering
+  - Markdown: bare keyword line (`Note`, `Warning`, `Important`, `Tip`, `Caution`, `Danger`, `Info`, `Success`, `Example`, `See also`, `Deprecated since`), matching Firecrawl's actual rendering
   - HTML classes containing: `admonition`, `note`, `warning`, `tip`, `important`, `caution`, `danger`, `info`
 - Steps:
   - Ordered list markers `1.` and `1)`, including nested ordered lists

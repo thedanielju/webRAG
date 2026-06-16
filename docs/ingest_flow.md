@@ -21,7 +21,7 @@ depth=0  → ingest root only
 depth=1  → ingest root + one batch expansion (default)
 depth=auto → orchestration decides based on retrieval quality
 
-Ingestion — gives you LinkCandidate objects with url, title, description
-Orchestration — scores them using those fields plus query context and corpus state, picks top-K, decides whether to expand
-Indexing — never sees LinkCandidate at all, only receives NormalizedDocument
-Retrieval — operates purely over indexed chunks, has no awareness of the expansion loop
+Ingestion: gives you LinkCandidate objects with url, title, description
+Orchestration: scores them using those fields plus query context and corpus state, picks top-K, decides whether to expand
+Indexing: never sees LinkCandidate at all, only receives NormalizedDocument
+Retrieval: operates purely over indexed chunks, has no awareness of the expansion loop

@@ -7,7 +7,7 @@ WebRAG is a research memory system that enables LLMs to reason over evolving web
 - **Reasoning layer** → the chat model (Claude, GPT, etc.)
 - **Knowledge layer** → WebRAG memory system
 
-The model queries WebRAG via MCP tools. WebRAG handles corpus construction, retrieval, and citation grounding — the model never needs to scrape, embed, or search on its own.
+The model queries WebRAG via MCP tools. WebRAG handles corpus construction, retrieval, and citation grounding, so the model never needs to scrape, embed, or search on its own.
 
 ## System Goals
 
@@ -22,7 +22,7 @@ The model queries WebRAG via MCP tools. WebRAG handles corpus construction, retr
 ```
 User Query
   ↓
-LLM (Reasoning layer — Claude, GPT, etc.)
+LLM (Reasoning layer - Claude, GPT, etc.)
   ↓
 Layer 5: MCP Server (tools.py, server.py, formatter.py)
   ↓
@@ -41,11 +41,11 @@ Each layer has a numbered directory (`src/01_ingestion/` through `src/05_mcp_ser
 
 ## Core Architectural Principles
 
-1. **Firecrawl for reliable acquisition** — Firecrawl handles bot compliance, browser rendering, rate limiting, proxy rotation, and PDF parsing. WebRAG consumes its output rather than reimplementing web scraping.
-2. **Evolving corpus, not static snapshots** — Key features include selective recursion, corpus growth strategy, retrieval policy, citation rigor, and intelligent stopping criteria.
-3. **Configuration in one place** — All settings live in `config.py` via pydantic-settings. Feature modules import typed constants and never read env vars directly.
-4. **Async everywhere** — All I/O (database, embedding API, reranker API, Firecrawl) is async. The orchestration loop uses `asyncio.gather()` for concurrent sub-query retrieval.
-5. **Clean error boundaries** — Each tool returns structured text, never exceptions. Errors are formatted as readable diagnostics that instruct the model not to hallucinate.
+1. **Reliable acquisition.** Firecrawl handles bot compliance, browser rendering, rate limiting, proxy rotation, and PDF parsing. WebRAG consumes its output rather than reimplementing web scraping. A key-free raw-HTTP fetcher covers simple pages when Firecrawl is not configured.
+2. **An evolving corpus.** The corpus grows over time through selective recursion, governed by a retrieval policy, citation rigor, and quality-driven stopping criteria, rather than being a static one-shot snapshot.
+3. **Configuration in one place.** All settings live in `config.py` via pydantic-settings. Feature modules import typed constants and never read env vars directly.
+4. **Async everywhere.** All I/O (database, embedding API, reranker API, Firecrawl) is async. The orchestration loop uses `asyncio.gather()` for concurrent sub-query retrieval.
+5. **Clean error boundaries.** Each tool returns structured text, never exceptions. Errors are formatted as readable diagnostics that instruct the model not to hallucinate.
 
 ---
 
@@ -55,11 +55,13 @@ Each layer has a numbered directory (`src/01_ingestion/` through `src/05_mcp_ser
 
 | Module               | Role |
 |----------------------|------|
-| `service.py`         | Top-level `ingest(url)` → `NormalizedDocument`. Coordinates Firecrawl client, link extraction, and content normalization. |
+| `service.py`         | Top-level `ingest(url)` → `NormalizedDocument`. Selects the fetch provider (`firecrawl` / `raw` / `auto`) and coordinates link extraction and content normalization. |
 | `firecrawl_client.py`| Thin async wrapper around the Firecrawl API. Handles scrape, map, and batch operations. |
+| `raw_fetch_client.py`| Key-free fetcher (httpx + BeautifulSoup) that returns the same `NormalizedDocument` shape as the Firecrawl path. Preserves LaTeX; best for simple HTML pages. |
+| `politeness.py`      | `robots.txt` checks (cached per origin) and a per-origin rate limiter, applied on both fetch paths. |
 | `links.py`           | URL canonicalization, tracking parameter stripping, trailing slash normalization, content hashing for dedup. |
 
-**Output:** `NormalizedDocument` — a Pydantic model containing URL, title, metadata, markdown text, HTML text, outgoing links, and a content hash.
+**Output:** `NormalizedDocument`, a Pydantic model containing URL, title, metadata, markdown text, HTML text, outgoing links, and a content hash.
 
 ## Layer 2: Indexing (`src/02_indexing/`)
 
@@ -97,7 +99,7 @@ Each layer has a numbered directory (`src/01_ingestion/` through `src/05_mcp_ser
 
 ### Retrieval Modes
 
-- **Full-context mode**: When total corpus tokens < `RETRIEVAL_FULL_CONTEXT_THRESHOLD` (30k default), returns all parent chunks ordered by position. No embedding query needed — fast and complete.
+- **Full-context mode**: When total corpus tokens < `RETRIEVAL_FULL_CONTEXT_THRESHOLD` (30k default), returns all parent chunks ordered by position. No embedding query is needed, so this path is fast and complete.
 - **Chunk mode**: Embeds the query, runs HNSW ANN search on child chunks, aggregates scores to parents, applies depth decay and similarity floor, trims to token budget.
 
 **Surface selection**: Each returned parent gets its `surface` field set to `"html"` or `"markdown"` based on rich-content flags, so downstream formatting knows how to render it.
@@ -130,17 +132,22 @@ The retrieval layer supports both modes. The MCP layer now defaults to `chunk` m
    ├── EXPAND_BREADTH → score candidate links, ingest top picks, re-retrieve
    ├── EXPAND_RECALL → re-retrieve with doubled token budget
    └── EXPAND_INTENT → re-analyse query with feedback, re-retrieve
-5. Repeat steps 3–4 up to max_expansion_depth iterations
+5. Repeat steps 3-4, descending level by level (links of links) until a stop condition fires
 6. Locality expansion (adjacent sibling chunks)
 7. Final merge, MMR dedup, token-budget trim, citation extraction
 ```
 
-### Stop Conditions (priority order)
+In `fast` mode (the MCP default) the loop does no expansion and runs once. In `deep` mode it genuinely recurses N levels, with the evaluator deciding how far to descend.
 
-1. Max expansion depth reached (safety cap)
-2. Token budget filled with good-quality, non-redundant chunks
-3. Diminishing returns (recall proxy barely improved iteration-over-iteration)
-4. Good plateau (low score variance, mean above mediocre floor)
+### Stop Conditions
+
+Quality is the primary signal. The evaluator's 11-rule decision matrix halts the loop when:
+
+1. The token budget is filled with good-quality, non-redundant chunks
+2. Returns diminish (the recall proxy barely improves iteration over iteration)
+3. Scores plateau (low variance with the mean above the mediocre floor)
+
+Underneath sit hard safety backstops that bound worst-case spend and latency on pathological sites: `MAX_PAGES_PER_ANSWER`, `MAX_TOKENS_INDEXED_PER_ANSWER`, `ANSWER_WALLCLOCK_BUDGET_SECONDS`, and `MAX_EXPANSION_DEPTH`. A quality-driven run halts long before any of these trip; when one does, the loop stops and the breach is logged and surfaced as the run's stop reason. Deep runs report the depth reached and the stop reason in a `[SEARCH]` line, and the reachability coverage in a `[COVERAGE]` line.
 
 ### Connection Strategy
 
@@ -172,8 +179,8 @@ The retrieval layer supports both modes. The MCP layer now defaults to `chunk` m
 
 - `answer` defaults to a fast pass: chunked retrieval and no expansion unless explicitly requested.
 - `answer` supports explicit overrides such as `research_mode="deep"` and `retrieval_mode="full_context"`.
-- Every tool response starts with a `[PRESENTATION GUIDE]` — inline directives that tell the model exactly which sections to include in its answer (ACI poka-yoke pattern).
-- Every tool response ends with `[FOLLOW-UP OPTIONS]` — context-sensitive suggestions (deep search, continued expansion, full context, follow-up search, query refinement) that the model presents to the user.
+- Every tool response starts with a `[PRESENTATION GUIDE]`: inline directives that tell the model exactly which sections to include in its answer (ACI poka-yoke pattern).
+- Every tool response ends with `[FOLLOW-UP OPTIONS]`: context-sensitive suggestions (deep search, continued expansion, full context, follow-up search, query refinement) that the model presents to the user.
 - Citations are guaranteed (never dropped by the token budget). The formatter builds citations before allocating space to evidence.
 - The orchestration engine emits richer phase and iteration progress callbacks that the MCP layer surfaces as progress notifications.
 
@@ -227,20 +234,20 @@ Total time: 5200ms
 The formatter manages a soft token budget (`MCP_RESPONSE_TOKEN_BUDGET`, default 30k) to keep responses within model context limits. Sections are split into guaranteed (never dropped) and budget-dependent (fills remaining space):
 
 **Guaranteed (built first, subtracted from budget):**
-1. **[PRESENTATION GUIDE]** — inline directives for the model (~80–120 tokens)
-2. **[SOURCES]** — always included in full (compact, essential for attribution)
-3. **[STATS]** — always included in full (small, useful for diagnostics)
-4. **[CITATIONS]** — always included in full (promoted from budget-dependent to guaranteed so citations are never silently dropped)
-5. **[FOLLOW-UP OPTIONS]** — context-sensitive next-step suggestions (~80–150 tokens)
+1. **[PRESENTATION GUIDE]** - inline directives for the model (~80-120 tokens)
+2. **[SOURCES]** - always included in full (compact, essential for attribution)
+3. **[STATS]** - always included in full (small, useful for diagnostics)
+4. **[CITATIONS]** - always included in full (promoted from budget-dependent to guaranteed so citations are never silently dropped)
+5. **[FOLLOW-UP OPTIONS]** - context-sensitive next-step suggestions (~80-150 tokens)
 
 **Budget-dependent (fills remaining space):**
-6. **[EVIDENCE]** — fills remaining budget, sorted by relevance; truncates with a count note
-7. **[EXPANSION TRACE]** — included if budget allows, otherwise replaced with summary
-8. **[IMAGES]** — included if budget allows
+6. **[EVIDENCE]** - fills remaining budget, sorted by relevance; truncates with a count note
+7. **[EXPANSION TRACE]** - included if budget allows, otherwise replaced with summary
+8. **[IMAGES]** - included if budget allows
 
 ### Transport Modes
 
-- **stdio** (default): For desktop MCP clients (Claude Desktop, Cursor). Client launches the server as a subprocess. All logging goes to stderr — stdout is reserved for the MCP JSON-RPC protocol stream.
+- **stdio** (default): For desktop MCP clients (Claude Desktop, Cursor). Client launches the server as a subprocess. All logging goes to stderr; stdout is reserved for the MCP JSON-RPC protocol stream.
 - **streamable-http**: For remote/hosted deployments. Listens on `MCP_HOST:MCP_PORT`.
 
 ---
@@ -251,6 +258,8 @@ The formatter manages a soft token budget (`MCP_RESPONSE_TOKEN_BUDGET`, default 
 
 - Root URL provided by the model
 - Sublinks discovered via Firecrawl's map endpoint
+
+In `deep` mode, WebRAG enumerates the seed's full reachable page set with Firecrawl's `map` endpoint (cached per origin) and ranks expansion candidates against that universe rather than only the links found in already-scraped page bodies. It then reports how many reachable pages it indexed in a `[COVERAGE]` line. This is gated to `deep` mode; `fast` mode never maps.
 
 ### Link Scoring
 
@@ -270,23 +279,23 @@ Expansion also applies a minimum scored-candidate threshold before expensive scr
 - Score plateau detection (variance + floor checks)
 - Max depth / max candidates safety caps
 
-Depth and page count are **weak** constraints — the evaluator's 11-rule decision matrix drives termination, not arbitrary limits.
+Depth and page count are weak constraints. The evaluator's 11-rule decision matrix drives termination; the hard ceilings (`MAX_PAGES_PER_ANSWER`, `MAX_TOKENS_INDEXED_PER_ANSWER`, `ANSWER_WALLCLOCK_BUDGET_SECONDS`, `MAX_EXPANSION_DEPTH`) are a safety backstop, not the normal stop.
 
 ## Citation Model
 
 WebRAG produces two citation layers:
 
-**1. Reference Layer** — Indexed source references:
+**1. Reference Layer.** Indexed source references:
 ```
 [1] Page Title — https://example.com/page § Section Heading
 ```
 
-**2. Evidence Layer** — Verbatim snippets reconstructed from stored character offsets:
+**2. Evidence Layer.** Verbatim snippets reconstructed from stored character offsets:
 ```
 "exact retrieved span from the original document"
 ```
 
-Citations are reconstructed from stored chunk offsets to guarantee fidelity — no paraphrasing or summarization.
+Citations are reconstructed from stored chunk offsets to guarantee fidelity, with no paraphrasing or summarization.
 
 ## Intended Usage Model
 

@@ -1,4 +1,4 @@
-# WebRAG MCP Layer — Design Document
+# WebRAG MCP Layer - Design Document
 
 > **Layer:** `src/05_mcp_server/` (`src.mcp_server`)
 
@@ -6,20 +6,20 @@
 
 ## 1. Purpose
 
-The MCP layer is the final layer of WebRAG. It wraps the `OrchestratorEngine` and exposes it as tools over the Model Context Protocol (MCP) for reasoning LLMs (Claude, ChatGPT, OpenWebUI). It is primarily a **transport + formatting** layer — it does not contain retrieval logic, reranking, or expansion decisions.
+The MCP layer is the final layer of WebRAG. It wraps the `OrchestratorEngine` and exposes it as tools over the Model Context Protocol (MCP) for reasoning LLMs (Claude, ChatGPT, OpenWebUI). It is primarily a **transport + formatting** layer; it does not contain retrieval logic, reranking, or expansion decisions.
 
 ### Responsibilities
 
 1. Start and manage the `OrchestratorEngine` lifecycle (create → start → reuse → stop).
 2. Define MCP tools with typed input schemas.
 3. Call `OrchestratorEngine.run()` and receive `OrchestrationResult`.
-4. Transform the structured result into formatted text the reasoning model can parse — including citations, rich content conversion, traversal diagrams, and stats.
+4. Transform the structured result into formatted text the reasoning model can parse, including citations, rich content conversion, traversal diagrams, and stats.
 5. Handle errors gracefully, surfacing them as readable text rather than letting the model hallucinate.
 
 ### Non-responsibilities
 
 - No retrieval, reranking, or expansion logic.
-- No LLM calls — the MCP layer never invokes a language model.
+- No LLM calls; the MCP layer never invokes a language model.
 - No corpus management UI in v1.
 
 ---
@@ -34,7 +34,7 @@ stdio is the standard transport for Claude Desktop and local MCP clients. The cl
 
 ### 2.2 Secondary: Streamable HTTP
 
-Streamable HTTP runs the server as a long-lived HTTP process. Claude's custom connectors (Settings > Connectors > "Add custom connector") connect to the server URL over HTTP. This is required for remote access — e.g., running WebRAG on a Linux server and connecting from Claude.ai or Claude Desktop on another machine.
+Streamable HTTP runs the server as a long-lived HTTP process. Claude's custom connectors (Settings > Connectors > "Add custom connector") connect to the server URL over HTTP. This is required for remote access, e.g., running WebRAG on a Linux server and connecting from Claude.ai or Claude Desktop on another machine.
 
 **Use when:** Deploying as a remote service, using Claude custom connectors, or multi-client access.
 
@@ -46,14 +46,14 @@ A single entry point supports both transports via configuration:
 - **Environment variable:** `MCP_TRANSPORT=streamable-http`
 - **Config:** `mcp_transport` setting in `.env`
 
-The `FastMCP` SDK from the official `mcp` Python package handles both transports natively. The same tool definitions work for either transport — only the server startup changes.
+The `FastMCP` SDK from the official `mcp` Python package handles both transports natively. The same tool definitions work for either transport; only the server startup changes.
 
 ### 2.4 Streamable HTTP Deployment Notes
 
 When using Streamable HTTP:
 
 - The server binds to `MCP_HOST` (default `0.0.0.0`) and `MCP_PORT` (default `8765`).
-- For production, deploy behind an nginx reverse proxy with TLS termination and Cloudflare DNS — matching the existing server infrastructure pattern.
+- For production, deploy behind an nginx reverse proxy with TLS termination and Cloudflare DNS, matching the existing server infrastructure pattern.
 - The MCP endpoint URL will be something like `https://webrag.example.com/mcp`.
 - Optional bearer token auth via `MCP_AUTH_TOKEN` env var (see §8 Security).
 
@@ -68,7 +68,7 @@ When using Streamable HTTP:
 - **Constructor:** Parameterless `OrchestratorEngine()`.
 - **`start()`:** Creates `AsyncConnectionPool` on non-Windows (Linux/macOS), or marks ready on Windows (uses per-request `AsyncConnection`).
 - **`stop()`:** Closes the pool (non-Windows) or marks stopped (Windows).
-- **`run()`:** Full orchestration pipeline — corpus prep, query analysis, retrieve-rerank-expand loop, locality expansion, citation assembly. Returns `OrchestrationResult`.
+- **`run()`:** Full orchestration pipeline: corpus prep, query analysis, retrieve-rerank-expand loop, locality expansion, citation assembly. Returns `OrchestrationResult`.
 
 ### 3.2 MCP Lifecycle Integration
 
@@ -87,7 +87,7 @@ Server shutdown:
   5. await engine.stop()        # Pool closed cleanly
 ```
 
-The engine instance is created once and shared across all tool invocations. Connection pooling happens inside the engine (pool size 1–4 on Linux; direct connections on Windows).
+The engine instance is created once and shared across all tool invocations. Connection pooling happens inside the engine (pool size 1-4 on Linux; direct connections on Windows).
 
 ### 3.3 Lifespan Implementation Pattern
 
@@ -109,15 +109,15 @@ For stdio transport, the lifespan runs for the duration of the subprocess. For S
 
 ## 4. MCP Interaction Model
 
-Before specifying tools, it's important to understand how MCP tool calls flow — because the MCP layer does not control the model's final output to the user. It provides structured context that the model uses to synthesize its response.
+Before specifying tools, it's important to understand how MCP tool calls flow, because the MCP layer does not control the model's final output to the user. It provides structured context that the model uses to synthesize its response.
 
 ### 4.1 How MCP Tools Work
 
 1. **User sends a message** to the reasoning model (Claude, ChatGPT, etc.).
-2. **The model decides whether to call a tool.** It sees the tool's name, description, and input schema — that's all it knows about the server. Based on the description, it decides whether this query needs WebRAG and constructs the parameters itself (picks the URL, formulates the query, etc.).
+2. **The model decides whether to call a tool.** It sees the tool's name, description, and input schema; that's all it knows about the server. Based on the description, it decides whether this query needs WebRAG and constructs the parameters itself (picks the URL, formulates the query, etc.).
 3. **The model sends a tool call request** to the MCP server. The user sees a "using tool" indicator but not the raw request.
-4. **The MCP server runs orchestration and returns text.** This is the formatted response — [PRESENTATION GUIDE], [SOURCES], [EVIDENCE], [IMAGES], [EXPANSION TRACE], [CITATIONS], [STATS], and [FOLLOW-UP OPTIONS] blocks. It goes back to the model as tool result content.
-5. **The model reads the tool result and writes its response to the user.** The model reads the formatted text like a person reading a research brief, then synthesizes its answer — citing sources, quoting verbatim text, referencing scores and metadata as it sees fit.
+4. **The MCP server runs orchestration and returns text.** This is the formatted response: [PRESENTATION GUIDE], [SOURCES], [EVIDENCE], [IMAGES], [EXPANSION TRACE], [CITATIONS], [STATS], and [FOLLOW-UP OPTIONS] blocks. It goes back to the model as tool result content.
+5. **The model reads the tool result and writes its response to the user.** The model reads the formatted text like a person reading a research brief, then synthesizes its answer, citing sources, quoting verbatim text, referencing scores and metadata as it sees fit.
 
 ### 4.2 What This Means for Formatting
 
@@ -138,7 +138,7 @@ MCP supports server-to-client **notifications** that are separate from the tool 
 
 ## 5. Tool Definitions
 
-### 5.1 `answer` — Primary Retrieval Tool
+### 5.1 `answer`: Primary Retrieval Tool
 
 **Description for the model:**
 > Query one or more web pages and their linked content for information. WebRAG will scrape each URL if not already indexed, decompose the query, retrieve and rerank relevant chunks, optionally expand to linked pages, and return cited evidence with source attribution. Use this when you need factual information grounded in specific web sources.
@@ -150,7 +150,7 @@ MCP supports server-to-client **notifications** that are separate from the tool 
 | `url` | `str \| list[str]` | Yes | One or more web page URLs to use as primary sources. When multiple URLs are provided, all are ingested and searched together. |
 | `query` | `str` | Yes | Question or information need. |
 | `intent` | `str \| None` | No | Hint: `"factual"`, `"comparison"`, `"how_to"`, or `"exploratory"`. If omitted, query analysis infers it. |
-| `known_context` | `str \| None` | No | What the model already knows — helps avoid redundant retrieval. |
+| `known_context` | `str \| None` | No | What the model already knows; helps avoid redundant retrieval. |
 | `constraints` | `list[str] \| None` | No | E.g., `["must include code examples"]`, `["focus on performance benchmarks"]`. |
 | `expansion_budget` | `int \| None` | No | Max expansion iterations. `0` = no expansion (seed pages only). `None` = auto (engine default, up to `max_expansion_depth`). |
 
@@ -160,9 +160,9 @@ MCP supports server-to-client **notifications** that are separate from the tool 
 1. Ingests all URLs in parallel (or serially if on Windows) by calling `engine._ensure_ingested()` for each additional URL before the main `engine.run()` call on the first URL.
 2. Since orchestration searches the full corpus after expansion starts, the additional URLs' content is naturally included in retrieval.
 
-**Note:** Multi-URL support requires a thin shim in the MCP layer to pre-ingest the extra URLs. The orchestration engine itself does not need changes — it already searches the full corpus after the first iteration. If the shim proves impractical due to `_ensure_ingested` being a private method, an alternative is to expose a public `ensure_ingested(url)` method on the engine.
+**Note:** Multi-URL support requires a thin shim in the MCP layer to pre-ingest the extra URLs. The orchestration engine itself does not need changes; it already searches the full corpus after the first iteration. If the shim proves impractical due to `_ensure_ingested` being a private method, an alternative is to expose a public `ensure_ingested(url)` method on the engine.
 
-### 5.2 `search` — Corpus Search Tool
+### 5.2 `search`: Corpus Search Tool
 
 **Description for the model:**
 > Search the existing WebRAG corpus for information without scraping new pages or expanding to linked content. Use this when you know the content has already been indexed (e.g., from a previous `answer` call) and want to ask a different question about the same material. Faster than `answer` because it skips ingestion and expansion.
@@ -184,9 +184,9 @@ MCP supports server-to-client **notifications** that are separate from the tool 
 
 The response format is identical to `answer` but without `[EXPANSION TRACE]` (no expansion occurs), and `[STATS]` reflects the simpler pipeline.
 
-**Why this exists:** After the model calls `answer` for a URL, the content is indexed in Postgres. If the user asks a follow-up question about the same content, `search` avoids re-scraping and re-expanding — it goes straight to vector search + reranking. Much faster for iterative research.
+**Why this exists:** After the model calls `answer` for a URL, the content is indexed in Postgres. If the user asks a follow-up question about the same content, `search` avoids re-scraping and re-expanding; it goes straight to vector search + reranking. Much faster for iterative research.
 
-### 5.3 `status` — Corpus Status Tool
+### 5.3 `status`: Corpus Status Tool
 
 **Description for the model:**
 > Check what content WebRAG currently has indexed. Returns document count, total tokens, indexed URLs with titles, and last-fetched timestamps. Use this to understand what's available before deciding whether to call `answer` (which ingests new content) or `search` (which queries existing content).
@@ -228,7 +228,7 @@ Indexed URLs:
 
 ### 5.4 Future Tools (not implemented in v1)
 
-- **`ingest`** — Explicitly scrape and index a URL without querying it. Useful for pre-loading content the model expects to query later. Trivial to add — calls `ingest()` + `index_batch()` directly.
+- **`ingest`**: Explicitly scrape and index a URL without querying it. Useful for pre-loading content the model expects to query later. Trivial to add; calls `ingest()` + `index_batch()` directly.
 
 ---
 
@@ -290,9 +290,9 @@ Total time: 2340ms (analysis: 180ms, retrieval: 890ms, reranking: 620ms, expansi
 
 ### 6.2 Section Details
 
-#### [SOURCES] — Reference List
+#### [SOURCES]: Reference List
 
-One entry per unique source URL across all chunks, numbered sequentially. A chunk's source number is determined by first-seen order (matching the chunk ordering from orchestration — grouped by `source_url`, then by `chunk_index`).
+One entry per unique source URL across all chunks, numbered sequentially. A chunk's source number is determined by first-seen order (matching the chunk ordering from orchestration, grouped by `source_url`, then by `chunk_index`).
 
 Format:
 ```
@@ -307,7 +307,7 @@ If multiple chunks share the same `source_url` but have different `section_headi
     § Random Forests
 ```
 
-#### [EVIDENCE] — Chunk Content
+#### [EVIDENCE]: Chunk Content
 
 One block per chunk, ordered by reranked score descending. Each block includes:
 
@@ -330,7 +330,7 @@ Source [3] (relevance: 0.68, sub-query: "how does gradient boosting handle missi
 {formatted text}
 ```
 
-#### [IMAGES] — Image References
+#### [IMAGES]: Image References
 
 Extracted from HTML-surface chunks during rich content conversion (see §7.5). Listed here so the reasoning model can reference them in its response. Only present if images were found.
 
@@ -340,7 +340,7 @@ Format:
 - [Diagram of architecture](https://example.com/img/arch.png) (from Source [2])
 ```
 
-#### [EXPANSION TRACE] — ASCII Traversal Diagram
+#### [EXPANSION TRACE]: ASCII Traversal Diagram
 
 Only rendered when `expansion_steps` is non-empty (i.e., expansion actually occurred).
 
@@ -372,15 +372,15 @@ Each node shows:
 
 **Building the tree:** `ExpansionStep` records are flat (one per iteration). The tree structure is reconstructed from `depth` values and `source_url` to build parent-child relationships. The seed URL is always the root.
 
-#### [PRESENTATION GUIDE] — Inline Directives
+#### [PRESENTATION GUIDE]: Inline Directives
 
-Always present (guaranteed). Placed at the **top** of every tool response so the model reads the formatting instructions before processing evidence. This is the ACI poka-yoke pattern — make the correct presentation behavior the easiest path.
+Always present (guaranteed). Placed at the **top** of every tool response so the model reads the formatting instructions before processing evidence. This is the ACI poka-yoke pattern: make the correct presentation behavior the easiest path.
 
-Content is dynamic — only references sections that actually exist in the current response. For example, items about the expansion trace and images only appear when those sections are present. Numbered items ensure the model follows a consistent output structure.
+Content is dynamic; it only references sections that actually exist in the current response. For example, items about the expansion trace and images only appear when those sections are present. Numbered items ensure the model follows a consistent output structure.
 
-Cost: ~80–120 tokens.
+Cost: ~80-120 tokens.
 
-#### [FOLLOW-UP OPTIONS] — Context-Sensitive Next Steps
+#### [FOLLOW-UP OPTIONS]: Context-Sensitive Next Steps
 
 Always present (guaranteed). Replaces the former conditional `[NEXT STEP]` block. Suggests relevant next actions based on the current pipeline state:
 
@@ -392,9 +392,9 @@ Always present (guaranteed). Replaces the former conditional `[NEXT STEP]` block
 
 Requires `format_result()` to receive `research_mode` and `retrieval_mode` kwargs (passed from `tools.py`).
 
-Cost: ~80–150 tokens.
+Cost: ~80-150 tokens.
 
-#### [STATS] — Summary Block
+#### [STATS]: Summary Block
 
 Always present. Provides the model with context about retrieval quality and performance.
 
@@ -410,28 +410,28 @@ Total time: {timing.total_ms:.0f}ms (analysis: {timing.query_analysis_ms:.0f}ms,
 ```
 
 Additional notes appended when relevant:
-- `Mode: full_context (entire corpus fits within token budget)` — when mode is `"full_context"`.
-- `Note: No expansion performed (single iteration).` — when `total_iterations == 0` and `expansion_budget != 0`.
-- `Note: Expansion budget exhausted (reached {N} of {N} iterations).` — when expansion hit the budget limit.
-- `Note: Expansion reached maximum depth ({N}). Results may benefit from a more specific query or a different seed URL.` — when depth equals `max_expansion_depth`.
+- `Mode: full_context (entire corpus fits within token budget)`: appended when mode is `"full_context"`.
+- `Note: No expansion performed (single iteration).`: appended when `total_iterations == 0` and `expansion_budget != 0`.
+- `Note: Expansion budget exhausted (reached {N} of {N} iterations).`: appended when expansion hit the budget limit.
+- `Note: Expansion reached maximum depth ({N}). Results may benefit from a more specific query or a different seed URL.`: appended when depth equals `max_expansion_depth`.
 
 ### 6.3 Response Token Budget
 
 The formatted response is governed by `mcp_response_token_budget` (default: 30,000 tokens, configurable). This is the **formatted output** budget, not the orchestration context budget.
 
-**Budget allocation — guaranteed sections are built first, then variable sections fill the remainder:**
+**Budget allocation:** Guaranteed sections are built first, then variable sections fill the remainder:
 
 Guaranteed (never dropped):
-1. **[PRESENTATION GUIDE]** — Always included. ~80–120 tokens.
-2. **[SOURCES]** — Always included in full. Typically small (< 500 tokens).
-3. **[STATS]** — Always included in full. Tiny (< 200 tokens).
-4. **[CITATIONS]** — Always included in full. Promoted from budget-dependent to guaranteed so citations are never silently dropped.
-5. **[FOLLOW-UP OPTIONS]** — Always included. ~80–150 tokens.
+1. **[PRESENTATION GUIDE]**: Always included. ~80-120 tokens.
+2. **[SOURCES]**: Always included in full. Typically small (< 500 tokens).
+3. **[STATS]**: Always included in full. Tiny (< 200 tokens).
+4. **[CITATIONS]**: Always included in full. Promoted from budget-dependent to guaranteed so citations are never silently dropped.
+5. **[FOLLOW-UP OPTIONS]**: Always included. ~80-150 tokens.
 
 Budget-dependent (fills remaining space):
-6. **[EVIDENCE]** — Fills remaining budget. Chunks are included in reranked-score order. When the budget is approached, stop adding chunks.
-7. **[EXPANSION TRACE]** — Included if budget allows after evidence. Omitted with a note if truncated: `[Expansion trace omitted — {N} iterations, see stats above]`.
-8. **[IMAGES]** — Included if budget allows after evidence.
+6. **[EVIDENCE]**: Fills remaining budget. Chunks are included in reranked-score order. When the budget is approached, stop adding chunks.
+7. **[EXPANSION TRACE]**: Included if budget allows after evidence. Omitted with a note if truncated: `[Expansion trace omitted — {N} iterations, see stats above]`.
+8. **[IMAGES]**: Included if budget allows after evidence.
 
 If chunks are truncated:
 ```
@@ -458,7 +458,7 @@ Each citation corresponds to a chunk and uses `CitationSpan.verbatim_text`. Thes
 
 ### 6.5 Progress Notifications
 
-MCP supports server-to-client notifications that appear in the client UI *during* tool execution. These are not part of the tool result — they're real-time status updates.
+MCP supports server-to-client notifications that appear in the client UI *during* tool execution. These are not part of the tool result; they're real-time status updates.
 
 The MCP layer sends progress notifications at each major orchestration phase:
 
@@ -547,7 +547,7 @@ def gradient_boost(X, y, n_estimators=100):
 
 ### 7.3 MathML → LaTeX
 
-Convert `<math>` elements to LaTeX notation wrapped in `$...$` (inline) or `$$...$$` (display). This is best-effort — MathML to LaTeX conversion is lossy.
+Convert `<math>` elements to LaTeX notation wrapped in `$...$` (inline) or `$$...$$` (display). This is best-effort; MathML to LaTeX conversion is lossy.
 
 **Strategy:**
 1. Check for an `alttext` attribute on the `<math>` element (many renderers include LaTeX source here). Use it if available.
@@ -607,7 +607,7 @@ Return the converted text and a list of extracted image metadata (URL, alt, capt
 
 ### 8.1 Design Principle
 
-**Fail transparently.** The reasoning model should always receive a text response — either formatted results or a clear error explanation. The model can then inform the user of what went wrong rather than hallucinating an answer.
+**Fail transparently.** The reasoning model should always receive a text response: either formatted results or a clear error explanation. The model can then inform the user of what went wrong rather than hallucinating an answer.
 
 ### 8.2 Error Categories
 
@@ -673,7 +673,7 @@ Total time: 450ms
 
 #### Partial Degradation
 
-Orchestration returns results but with quality concerns (e.g., all scores below a low threshold, reranker fell back to retrieval scores). This is handled within orchestration already — the MCP layer formats whatever `OrchestrationResult` it receives. Quality signals in `[STATS]` (stop reason, scores, mode) give the model enough context to judge reliability.
+Orchestration returns results but with quality concerns (e.g., all scores below a low threshold, reranker fell back to retrieval scores). This is handled within orchestration already; the MCP layer formats whatever `OrchestrationResult` it receives. Quality signals in `[STATS]` (stop reason, scores, mode) give the model enough context to judge reliability.
 
 ### 8.3 Timeout Implementation
 
@@ -694,7 +694,7 @@ Catch `asyncio.TimeoutError` and return the timeout error response.
 
 ### 9.1 stdio Transport
 
-No network exposure. The MCP client (Claude Desktop) spawns the server as a subprocess. Security is inherent — only the local user's MCP client can communicate with it.
+No network exposure. The MCP client (Claude Desktop) spawns the server as a subprocess. Security is inherent: only the local user's MCP client can communicate with it.
 
 ### 9.2 Streamable HTTP Transport
 
@@ -707,11 +707,11 @@ When exposed over HTTP, the server should be protected:
 
 **Secondary protection: Optional bearer token.** Set `MCP_AUTH_TOKEN` as an environment variable. When set, the server validates that incoming requests include a matching `Authorization: Bearer {token}` header. When unset, the server runs authless (relying on network-level security).
 
-This matches Claude's custom connector model — connectors support optional OAuth or bearer token auth. For a self-hosted personal server, network-level security is usually sufficient, with the bearer token as an extra layer.
+This matches Claude's custom connector model (connectors support optional OAuth or bearer token auth). For a self-hosted personal server, network-level security is usually sufficient, with the bearer token as an extra layer.
 
 ### 9.3 Input Validation
 
-All tool parameters are validated by FastMCP's schema validation (Pydantic-backed). The `url` parameter is passed directly to orchestration's `_ensure_ingested()`, which handles it via Firecrawl. No additional URL sanitization is needed at the MCP layer — Firecrawl handles the actual HTTP request.
+All tool parameters are validated by FastMCP's schema validation (Pydantic-backed). The `url` parameter is passed directly to orchestration's `_ensure_ingested()`, which handles it via Firecrawl. No additional URL sanitization is needed at the MCP layer; Firecrawl handles the actual HTTP request.
 
 ---
 
@@ -733,9 +733,9 @@ Add to the existing `Settings` class in `config.py`:
 
 ### 10.2 Existing Settings Reused
 
-- `database_url` — Passed through to `OrchestratorEngine` (which reads it from `settings` directly).
-- `embedding_tokenizer_kind` / `embedding_tokenizer_name` — Reused for token counting in the response budget logic.
-- All orchestration settings — Engine reads them directly from `settings`.
+- `database_url`: Passed through to `OrchestratorEngine` (which reads it from `settings` directly).
+- `embedding_tokenizer_kind` / `embedding_tokenizer_name`: Reused for token counting in the response budget logic.
+- All orchestration settings: Engine reads them directly from `settings`.
 
 ---
 
@@ -752,15 +752,15 @@ src/05_mcp_server/
 
 ### 11.1 Module Responsibilities
 
-**`server.py`** — Entry point. Creates `FastMCP` instance, registers the lifespan context manager (engine start/stop), registers tools, and runs the server with the configured transport. Contains `__main__` block and CLI argument parsing.
+**`server.py`**: Entry point. Creates `FastMCP` instance, registers the lifespan context manager (engine start/stop), registers tools, and runs the server with the configured transport. Contains `__main__` block and CLI argument parsing.
 
-**`tools.py`** — Defines all tool functions (`answer`, `search`, `status`). The `answer` handler calls `engine.run()` with timeout wrapping and progress notifications, handles multi-URL pre-ingestion, and passes the `OrchestrationResult` to the formatter. The `search` handler calls `retrieve()` + `rerank()` directly. The `status` handler queries the database. All handlers handle their error categories (§8) and return appropriate MCP responses.
+**`tools.py`**: Defines all tool functions (`answer`, `search`, `status`). The `answer` handler calls `engine.run()` with timeout wrapping and progress notifications, handles multi-URL pre-ingestion, and passes the `OrchestrationResult` to the formatter. The `search` handler calls `retrieve()` + `rerank()` directly. The `status` handler queries the database. All handlers handle their error categories (§8) and return appropriate MCP responses.
 
-**`formatter.py`** — The core formatting logic. Takes `OrchestrationResult` and produces the final text response. Orchestrates the section assembly: [PRESENTATION GUIDE], [SOURCES], [EVIDENCE], [IMAGES], [EXPANSION TRACE], [CITATIONS], [STATS], [FOLLOW-UP OPTIONS]. Manages the token budget with guaranteed sections (sources, stats, citations, presentation guide, follow-up options) built first and variable sections (evidence, trace, images) filling the remainder. Builds the ASCII traversal diagram from `ExpansionStep` records. Accepts `research_mode` and `retrieval_mode` kwargs to generate context-sensitive follow-up options.
+**`formatter.py`**: The core formatting logic. Takes `OrchestrationResult` and produces the final text response. Orchestrates the section assembly: [PRESENTATION GUIDE], [SOURCES], [EVIDENCE], [IMAGES], [EXPANSION TRACE], [CITATIONS], [STATS], [FOLLOW-UP OPTIONS]. Manages the token budget with guaranteed sections (sources, stats, citations, presentation guide, follow-up options) built first and variable sections (evidence, trace, images) filling the remainder. Builds the ASCII traversal diagram from `ExpansionStep` records. Accepts `research_mode` and `retrieval_mode` kwargs to generate context-sensitive follow-up options.
 
-**`html_converter.py`** — Stateless conversion functions for HTML → readable text. One function per element type (tables, code blocks, MathML, definition lists, admonitions, images). Also extracts image metadata. Called by `formatter.py` when processing chunks with `surface="html"`.
+**`html_converter.py`**: Stateless conversion functions for HTML → readable text. One function per element type (tables, code blocks, MathML, definition lists, admonitions, images). Also extracts image metadata. Called by `formatter.py` when processing chunks with `surface="html"`.
 
-**`errors.py`** — Error response templates. Functions that produce formatted error text for each error category (full failure, timeout, empty results). Keeps error formatting consistent and testable.
+**`errors.py`**: Error response templates. Functions that produce formatted error text for each error category (full failure, timeout, empty results). Keeps error formatting consistent and testable.
 
 ### 11.2 Dependency Graph
 
@@ -794,7 +794,7 @@ Add the `mcp` package dependency and the new module mapping:
 
 ### 12.1 stdio Transport Constraint
 
-**Critical:** When using stdio transport, the server MUST NOT write to stdout — stdout is reserved for MCP protocol messages. All logging must go to stderr.
+**Critical:** When using stdio transport, the server MUST NOT write to stdout; stdout is reserved for MCP protocol messages. All logging must go to stderr.
 
 Configure Python logging to write to stderr:
 ```python
@@ -807,7 +807,7 @@ This also applies to any library that might print to stdout. Suppress or redirec
 
 Key events to log at INFO level:
 - Server startup (transport, host/port if HTTP, engine started).
-- Tool call received (tool name, URL, query — truncated).
+- Tool call received (tool name, URL, query, truncated).
 - Orchestration completed (timing, chunk count, mode).
 - Tool response sent (response size in tokens).
 - Server shutdown.
@@ -837,7 +837,7 @@ At ERROR level:
 **Formatter tests** (`test_formatter.py`):
 - Build mock `OrchestrationResult` objects with known chunks, citations, expansion steps.
 - Verify the formatted output contains expected sections, source numbering, score formatting.
-- Test token budget truncation — ensure chunks are dropped in correct order.
+- Test token budget truncation: ensure chunks are dropped in correct order.
 - Test edge cases: zero chunks, single chunk, full-context mode, no expansion.
 
 **HTML converter tests** (`test_html_converter.py`):
@@ -847,7 +847,7 @@ At ERROR level:
 
 **Traversal diagram tests** (`test_formatter.py` or separate):
 - Build mock `ExpansionStep` lists and verify ASCII tree output.
-- Test URL truncation logic — common prefix detection, external URL handling.
+- Test URL truncation logic: common prefix detection, external URL handling.
 - Test single-depth, multi-depth, and failed-expansion cases.
 
 **Error formatting tests** (`test_errors.py`):
@@ -859,10 +859,10 @@ At ERROR level:
 **MCP client test** (`test_integration.py`):
 - Use the `mcp` SDK's client to connect to the server (stdio transport).
 - Call `list_tools()` and verify `answer`, `search`, and `status` tool schemas are correct.
-- Call the `answer` tool with a known URL and query — verify well-formed response with expected sections.
-- Call the `status` tool — verify corpus stats are returned.
-- Call `answer` then `search` on the same corpus — verify `search` returns results without re-ingesting.
-- Test multi-URL `answer` call — verify both URLs are ingested and searched.
+- Call the `answer` tool with a known URL and query; verify well-formed response with expected sections.
+- Call the `status` tool; verify corpus stats are returned.
+- Call `answer` then `search` on the same corpus; verify `search` returns results without re-ingesting.
+- Test multi-URL `answer` call; verify both URLs are ingested and searched.
 - Gate behind a marker (e.g., `@pytest.mark.integration`) since it requires a running database, API keys, and network access.
 
 **MCP Inspector**:
@@ -886,7 +886,7 @@ Create reusable fixtures that build `OrchestrationResult` objects with:
 ### 14.1 Platform Compatibility
 
 The MCP layer must work on both Windows and Linux:
-- **Windows:** stdio transport is primary. The engine uses direct `AsyncConnection` (no pool). The event loop is `SelectorEventLoop`. No special handling needed in the MCP layer — the engine manages this internally.
+- **Windows:** stdio transport is primary. The engine uses direct `AsyncConnection` (no pool). The event loop is `SelectorEventLoop`. No special handling needed in the MCP layer; the engine manages this internally.
 - **Linux:** Both transports work. The engine uses `AsyncConnectionPool` for efficient connection reuse.
 
 ### 14.2 Import Path
@@ -899,7 +899,7 @@ The MCP server handles one tool call at a time per client session (MCP is reques
 
 ### 14.4 Image Survival Through Reranking
 
-Images embedded in HTML chunks survive the reranking pipeline because they're part of `selected_text`. The reranker scores the full passage text — `<img>` tags are just part of the HTML content. The MCP layer's HTML converter extracts image metadata during formatting. No special reranker handling is needed.
+Images embedded in HTML chunks survive the reranking pipeline because they're part of `selected_text`. The reranker scores the full passage text; `<img>` tags are just part of the HTML content. The MCP layer's HTML converter extracts image metadata during formatting. No special reranker handling is needed.
 
 ---
 
@@ -907,10 +907,10 @@ Images embedded in HTML chunks survive the reranking pipeline because they're pa
 
 Items deferred from v1 but architecturally anticipated:
 
-- **`ingest` tool** — Explicitly scrape and index a URL without querying. Calls `ingest()` + `index_batch()` directly. Trivial to add.
-- **Direct image support** — If MCP custom connectors add image content support, upgrade the [IMAGES] section to pass images inline rather than as URL references.
-- **Full streaming responses** — v1 streams progress notifications but delivers the tool result as a single message. v2 should refactor `engine.run()` to yield intermediate `OrchestrationResult` snapshots, enabling incremental streaming of [SOURCES] and [EVIDENCE] as they become available.
-- **Conversation-aware corpus** — Track which URLs were ingested in the current conversation so the model can make smarter `search` vs `answer` decisions without calling `status` each time.
+- **`ingest` tool**: Explicitly scrape and index a URL without querying. Calls `ingest()` + `index_batch()` directly. Trivial to add.
+- **Direct image support**: If MCP custom connectors add image content support, upgrade the [IMAGES] section to pass images inline rather than as URL references.
+- **Full streaming responses**: v1 streams progress notifications but delivers the tool result as a single message. v2 should refactor `engine.run()` to yield intermediate `OrchestrationResult` snapshots, enabling incremental streaming of [SOURCES] and [EVIDENCE] as they become available.
+- **Conversation-aware corpus**: Track which URLs were ingested in the current conversation so the model can make smarter `search` vs `answer` decisions without calling `status` each time.
 
 ---
 
@@ -919,9 +919,9 @@ Items deferred from v1 but architecturally anticipated:
 The MCP layer is the thinnest layer in the WebRAG stack. It:
 1. Manages the engine lifecycle (start/stop).
 2. Defines three tools: `answer` (full orchestration with multi-URL support), `search` (fast corpus query), and `status` (corpus inspection).
-3. Formats `OrchestrationResult` into structured text with an inline presentation guide, citations, rich content, traversal diagrams, stats, and follow-up options — acting as a research brief for the reasoning model. Citations are guaranteed (never dropped by budget), and the presentation guide uses the ACI poka-yoke pattern to drive consistent model output.
+3. Formats `OrchestrationResult` into structured text with an inline presentation guide, citations, rich content, traversal diagrams, stats, and follow-up options, acting as a research brief for the reasoning model. Citations are guaranteed (never dropped by budget), and the presentation guide uses the ACI poka-yoke pattern to drive consistent model output.
 4. Sends real-time progress notifications during orchestration so the user sees what's happening.
 5. Handles errors transparently, surfacing them as readable text so the model can inform the user rather than hallucinate.
 6. Supports both stdio (default, for local use) and Streamable HTTP (for remote/connector use) transports.
 
-The formatting logic in `formatter.py` and `html_converter.py` is the bulk of the implementation work. The `search` and `status` tools are lightweight — they bypass orchestration and talk directly to the retrieval layer and database respectively. Progress notifications require a small callback addition to the orchestration engine.
+The formatting logic in `formatter.py` and `html_converter.py` is the bulk of the implementation work. The `search` and `status` tools are lightweight; they bypass orchestration and talk directly to the retrieval layer and database respectively. Progress notifications require a small callback addition to the orchestration engine.
