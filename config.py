@@ -154,6 +154,13 @@ class Settings(BaseSettings):
     expansion_min_candidate_score: float = Field(
         default=0.12, validation_alias="EXPANSION_MIN_CANDIDATE_SCORE"
     )
+    # When enabled (default), deep-mode expansion enumerates the seed's
+    # reachable page universe via Firecrawl /map and ranks expansion
+    # candidates against it (not just links found in scraped bodies).
+    # Gated to deep mode regardless of this flag — fast mode never maps.
+    reachability_enabled: bool = Field(
+        default=True, validation_alias="REACHABILITY_ENABLED"
+    )
 
     # ── Orchestration: Locality Expansion ─────────────────────────
     locality_expansion_enabled: bool = Field(

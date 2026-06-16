@@ -1256,6 +1256,229 @@ class TestExpanderParentURLDerivation:
 
 
 # ===================================================================
+# 1.5b  Reachability Frontier + Coverage Tests
+# ===================================================================
+
+class TestReachabilityFrontier:
+    """Test the deep-mode reachability frontier (Firecrawl /map)."""
+
+    @pytest.mark.asyncio
+    async def test_frontier_normalizes_and_dedups(self):
+        """_fetch_reachable_frontier strips fragments/trailing slashes
+        and deduplicates while preserving first-seen order."""
+        from src.orchestration import expander
+
+        # Mixed shapes (objects + dicts), fragments, trailing slashes,
+        # and an exact duplicate that should collapse after normalization.
+        raw_links = [
+            {"url": "https://example.com/docs/a/"},
+            {"url": "https://example.com/docs/a#section"},  # dup of above
+            {"url": "https://example.com/docs/b"},
+            {"url": None},                                  # non-str url → skip
+            {"no_url_key": True},                           # missing url → skip
+        ]
+
+        map_mock = AsyncMock(return_value=raw_links)
+        with patch.object(expander.firecrawl_client, "map_reachable", map_mock):
+            frontier = await expander._fetch_reachable_frontier(
+                "https://example.com/docs/a"
+            )
+
+        assert frontier == [
+            "https://example.com/docs/a",
+            "https://example.com/docs/b",
+        ]
+        map_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_frontier_returns_none_on_map_failure(self):
+        """A /map failure yields None (not []) so callers distinguish
+        'reachability didn't run' from 'ran but empty'."""
+        from src.orchestration import expander
+
+        map_mock = AsyncMock(side_effect=RuntimeError("firecrawl down"))
+        with patch.object(expander.firecrawl_client, "map_reachable", map_mock):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                frontier = await expander._fetch_reachable_frontier(
+                    "https://example.com/docs/a"
+                )
+
+        assert frontier is None
+
+    @pytest.mark.asyncio
+    async def test_fast_mode_does_not_call_map(self):
+        """Fast mode must never trigger the reachability /map call."""
+        from src.orchestration import expander
+
+        map_mock = AsyncMock(return_value=[])
+        with patch.object(expander, "_get_source_document_ids",
+                          new_callable=AsyncMock, return_value=[]):
+            with patch.object(expander, "ingest", new_callable=AsyncMock):
+                with patch.object(expander, "index_batch", new_callable=AsyncMock):
+                    with patch.object(expander.firecrawl_client,
+                                      "map_reachable", map_mock):
+                        outcome = await expander.expand(
+                            "https://example.com/docs/page.html",
+                            "test query",
+                            _make_query_analysis(),
+                            MagicMock(),
+                            already_ingested_urls=set(),
+                            current_depth=0,
+                            research_mode="fast",
+                        )
+
+        map_mock.assert_not_awaited()
+        assert outcome.reachable_total is None
+
+    @pytest.mark.asyncio
+    async def test_deep_mode_folds_reachable_urls_into_universe(self):
+        """Deep mode maps the seed origin and the reachable URLs become
+        scorable candidates (recorded as reachable_total)."""
+        from src.orchestration import expander
+
+        reachable = [
+            {"url": "https://example.com/docs/guide"},
+            {"url": "https://example.com/docs/reference"},
+            {"url": "https://example.com/docs/tutorial"},
+        ]
+        map_mock = AsyncMock(return_value=reachable)
+        # Capture what score_candidates is asked to rank.
+        captured: dict[str, Any] = {}
+
+        async def _fake_score(cands, *a, **kw):
+            captured["urls"] = [c.target_url for c in cands]
+            return []  # no selection → short-circuit before scrape/index
+
+        with patch.object(expander, "_get_source_document_ids",
+                          new_callable=AsyncMock, return_value=[]):
+            with patch.object(expander, "score_candidates",
+                              side_effect=_fake_score):
+                with patch.object(expander.firecrawl_client,
+                                  "map_reachable", map_mock):
+                    with _override_settings(reachability_enabled=True):
+                        outcome = await expander.expand(
+                            "https://example.com/docs/page.html",
+                            "test query",
+                            _make_query_analysis(),
+                            MagicMock(),
+                            already_ingested_urls=set(),
+                            current_depth=0,
+                            research_mode="deep",
+                        )
+
+        map_mock.assert_awaited_once()
+        assert outcome.reachable_total == 3
+        # Every reachable URL was offered to the scorer.
+        for url in (
+            "https://example.com/docs/guide",
+            "https://example.com/docs/reference",
+            "https://example.com/docs/tutorial",
+        ):
+            assert url in captured["urls"]
+
+    @pytest.mark.asyncio
+    async def test_reachability_disabled_skips_map_in_deep_mode(self):
+        """REACHABILITY_ENABLED=false suppresses the /map call even in
+        deep mode."""
+        from src.orchestration import expander
+
+        map_mock = AsyncMock(return_value=[])
+        with patch.object(expander, "_get_source_document_ids",
+                          new_callable=AsyncMock, return_value=[]):
+            with patch.object(expander, "ingest", new_callable=AsyncMock):
+                with patch.object(expander, "index_batch", new_callable=AsyncMock):
+                    with patch.object(expander.firecrawl_client,
+                                      "map_reachable", map_mock):
+                        with _override_settings(reachability_enabled=False):
+                            outcome = await expander.expand(
+                                "https://example.com/docs/page.html",
+                                "test query",
+                                _make_query_analysis(),
+                                MagicMock(),
+                                already_ingested_urls=set(),
+                                current_depth=0,
+                                research_mode="deep",
+                            )
+
+        map_mock.assert_not_awaited()
+        assert outcome.reachable_total is None
+
+
+class TestReachabilityCoverageMath:
+    """Test coverage_ratio computation on OrchestrationResult."""
+
+    def _make_result(
+        self, *, reachable_total, indexed_count, coverage_ratio,
+    ) -> Any:
+        from src.orchestration.models import OrchestrationResult, OrchestrationTiming
+
+        return OrchestrationResult(
+            chunks=[],
+            citations=[],
+            query_analysis=_make_query_analysis(),
+            expansion_steps=[],
+            corpus_stats=CorpusStats(
+                total_documents=1, total_parent_chunks=1,
+                total_tokens=10, documents_matched=[],
+            ),
+            timing=OrchestrationTiming(),
+            mode="chunk",
+            final_decision=ExpansionDecision(
+                action="stop", reason="done", confidence="high",
+            ),
+            total_iterations=1,
+            total_urls_ingested=indexed_count,
+            reachable_total=reachable_total,
+            indexed_count=indexed_count,
+            coverage_ratio=coverage_ratio,
+        )
+
+    def test_coverage_ratio_partial(self):
+        # 12 of 40 → 0.30.
+        ratio = min(1.0, 12 / 40)
+        result = self._make_result(
+            reachable_total=40, indexed_count=12, coverage_ratio=ratio,
+        )
+        assert result.coverage_ratio == pytest.approx(0.30)
+
+    def test_coverage_ratio_clamped_at_one(self):
+        # indexed can exceed the mapped universe (parent URLs, off-origin
+        # links); coverage must clamp to 1.0 rather than exceed it.
+        ratio = min(1.0, 50 / 40)
+        result = self._make_result(
+            reachable_total=40, indexed_count=50, coverage_ratio=ratio,
+        )
+        assert result.coverage_ratio == 1.0
+
+    def test_coverage_fields_absent_in_fast_mode(self):
+        # No reachability → fields stay None / 0 and the formatter omits
+        # the [COVERAGE] line.
+        result = self._make_result(
+            reachable_total=None, indexed_count=3, coverage_ratio=None,
+        )
+        assert result.reachable_total is None
+        assert result.coverage_ratio is None
+
+    def test_formatter_emits_coverage_line_only_when_reachability_ran(self):
+        from src.mcp_server.formatter import _build_stats
+
+        deep = self._make_result(
+            reachable_total=40, indexed_count=12, coverage_ratio=0.30,
+        )
+        fast = self._make_result(
+            reachable_total=None, indexed_count=3, coverage_ratio=None,
+        )
+
+        deep_stats = _build_stats(deep)
+        fast_stats = _build_stats(fast)
+
+        assert "[COVERAGE] indexed 12 of ~40 reachable pages" in deep_stats
+        assert "(30%)" in deep_stats
+        assert "[COVERAGE]" not in fast_stats
+
+
+# ===================================================================
 # 1.6  Merger Tests
 # ===================================================================
 

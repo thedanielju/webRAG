@@ -114,6 +114,9 @@ class ExpansionOutcome(BaseModel):
     candidates_scored: int
     candidates_selected: int
     depth: int
+    # Size of the reachable page universe (Firecrawl /map) when this
+    # iteration ran reachability; None in fast mode or when disabled.
+    reachable_total: int | None = None
 
 
 class ExpansionStep(BaseModel):
@@ -176,6 +179,16 @@ class OrchestrationResult(BaseModel):
     total_iterations: int
     total_urls_ingested: int
 
+    # ── Reachability coverage (deep mode only) ────────────────────
+    # reachable_total is the size of the seed's reachable page universe
+    # as enumerated by Firecrawl /map.  It is None when reachability did
+    # not run (fast mode, or REACHABILITY_ENABLED=false), which lets the
+    # formatter omit the coverage line cleanly.  coverage_ratio is
+    # indexed_count / reachable_total, clamped to [0.0, 1.0].
+    reachable_total: int | None = None
+    indexed_count: int = 0
+    coverage_ratio: float | None = None
+
 
 # ── Mutable orchestration state (dataclass, not Pydantic) ─────────
 
@@ -214,3 +227,7 @@ class OrchestrationState:
     # History.
     expansion_steps: list[ExpansionStep] = field(default_factory=list)
     all_retrieval_results: list[RetrievalResult] = field(default_factory=list)
+
+    # Reachability (set on the first deep-mode expansion that maps the
+    # seed origin).  None means reachability never ran for this answer.
+    reachable_total: int | None = None

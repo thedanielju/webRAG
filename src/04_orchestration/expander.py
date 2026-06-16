@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 from psycopg import AsyncConnection
 
 from config import settings
+from src.ingestion import firecrawl_client
 from src.ingestion.links import enrich_link_candidates, get_link_candidates
 from src.ingestion.service import NormalizedDocument, ingest
 from src.indexing.indexer import index_batch
@@ -104,6 +105,7 @@ async def expand(
     *,
     already_ingested_urls: set[str],
     current_depth: int,
+    research_mode: str = "fast",
 ) -> ExpansionOutcome:
     """Execute one expansion iteration.
 
@@ -112,11 +114,18 @@ async def expand(
       2. Filter out already-ingested URLs.
       3. Enrich un-enriched candidates via ``enrich_link_candidates()``.
       4. Generate parent URL candidates from seed URL path derivation.
-      5. Score all candidates.
-      6. Select top ``max_candidates_per_iteration``.
-      7. Scrape selected URLs concurrently.
-      8. Index scraped documents.
-      9. Return ``ExpansionOutcome``.
+      5. In deep mode, add the seed's reachable page universe (Firecrawl
+         /map) as additional candidates so scoring ranks against the
+         whole site, not just links found in scraped bodies.
+      6. Score all candidates.
+      7. Select top ``max_candidates_per_iteration``.
+      8. Scrape selected URLs concurrently.
+      9. Index scraped documents.
+     10. Return ``ExpansionOutcome``.
+
+    ``research_mode`` gates reachability: only ``"deep"`` triggers the
+    /map call (and only when ``settings.reachability_enabled``).  Fast
+    mode preserves the legacy body-discovered candidate behavior.
     """
     new_depth = current_depth + 1
 
@@ -157,6 +166,25 @@ async def expand(
                 _synthetic_candidate(purl, seed_url, new_depth)
             )
 
+    # 5. Reachability frontier (deep mode only).
+    # Enumerate the seed's reachable page universe once and fold it into
+    # the candidate pool.  These are bare URL candidates (no title/desc),
+    # so the existing scorer naturally prefers body-discovered, enriched
+    # candidates over them — the reachable set only widens the universe,
+    # it does not override richer signals.
+    reachable_total: int | None = None
+    if research_mode == "deep" and settings.reachability_enabled:
+        reachable_urls = await _fetch_reachable_frontier(seed_url)
+        if reachable_urls is not None:
+            reachable_total = len(reachable_urls)
+            existing_urls = {c.target_url for c in all_candidates}
+            for rurl in reachable_urls:
+                if rurl not in already_ingested_urls and rurl not in existing_urls:
+                    all_candidates.append(
+                        _synthetic_candidate(rurl, seed_url, new_depth)
+                    )
+                    existing_urls.add(rurl)
+
     # Deduplicate by target_url.
     seen_urls: set[str] = set()
     deduped: list[PersistedLinkCandidate] = []
@@ -168,14 +196,14 @@ async def expand(
     # Build in-degree map for scoring.
     in_degree_map = _build_in_degree_map(deduped)
 
-    # 5. Score candidates (limit to candidates_to_score_per_iteration).
+    # 6. Score candidates (limit to candidates_to_score_per_iteration).
     to_score = deduped[: settings.candidates_to_score_per_iteration]
     scored = await score_candidates(
         to_score, query, query_analysis, already_ingested_urls,
         in_degree_map=in_degree_map,
     )
 
-    # 6. Select top candidates.
+    # 7. Select top candidates.
     if scored and scored[0].score < settings.expansion_min_candidate_score:
         return ExpansionOutcome(
             urls_attempted=[],
@@ -185,6 +213,7 @@ async def expand(
             candidates_scored=len(scored),
             candidates_selected=0,
             depth=new_depth,
+            reachable_total=reachable_total,
         )
 
     selected = scored[: settings.max_candidates_per_iteration]
@@ -197,11 +226,12 @@ async def expand(
             candidates_scored=len(scored),
             candidates_selected=0,
             depth=new_depth,
+            reachable_total=reachable_total,
         )
 
     selected_urls = [s.link_candidate.target_url for s in selected]
 
-    # 7. Scrape concurrently.
+    # 8. Scrape concurrently.
     scrape_tasks = [ingest(url) for url in selected_urls]
     results = await asyncio.gather(*scrape_tasks, return_exceptions=True)
 
@@ -219,7 +249,7 @@ async def expand(
         else:
             urls_failed.append(url)
 
-    # 8. Index all successful scrapes.
+    # 9. Index all successful scrapes.
     chunks_added = 0
     if docs:
         depths = [new_depth] * len(docs)
@@ -236,7 +266,53 @@ async def expand(
         candidates_scored=len(scored),
         candidates_selected=len(selected),
         depth=new_depth,
+        reachable_total=reachable_total,
     )
+
+
+# ── Reachability frontier ────────────────────────────────────────
+
+
+async def _fetch_reachable_frontier(seed_url: str) -> list[str] | None:
+    """Return the seed origin's reachable URLs, normalized and deduped.
+
+    Calls the cached ``firecrawl_client.map_reachable()`` (one /map round
+    per origin per process), then runs every URL through Firecrawl's
+    ``_normalize_url_for_match`` (strip fragment, trailing slash) and
+    deduplicates while preserving first-seen order.
+
+    Returns ``None`` (not an empty list) if the map call fails, so callers
+    can distinguish "reachability didn't run" from "reachability ran and
+    found nothing".  Mapping failures are non-fatal — expansion still
+    proceeds with body-discovered candidates.
+    """
+    try:
+        raw_links = await firecrawl_client.map_reachable(
+            seed_url, limit=settings.firecrawl_map_default_limit,
+        )
+    except Exception as exc:
+        warnings.warn(
+            f"Reachability map failed for {seed_url}: {exc!r}",
+            stacklevel=2,
+        )
+        return None
+
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for link in raw_links:
+        # map() yields model objects or plain dicts depending on SDK shape.
+        url = getattr(link, "url", None)
+        if url is None and isinstance(link, dict):
+            url = link.get("url")
+        if not isinstance(url, str):
+            continue
+        norm = firecrawl_client._normalize_url_for_match(url)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        normalized.append(norm)
+
+    return normalized
 
 
 # ── Parent URL derivation ────────────────────────────────────────

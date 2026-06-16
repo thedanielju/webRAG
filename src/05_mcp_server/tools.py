@@ -230,6 +230,7 @@ async def answer(
                 constraints=constraints,
                 expansion_budget=effective_expansion_budget,
                 retrieval_mode=resolved_retrieval_mode,
+                research_mode=resolved_research_mode,
                 progress_callback=lambda phase, data: _mcp_progress_notifier(ctx, phase, data),
             ),
             timeout=settings.mcp_tool_timeout,

@@ -638,6 +638,21 @@ def _build_stats(result: OrchestrationResult) -> str:
         f"Expansion iterations: {result.total_iterations}",
         f"URLs ingested: {result.total_urls_ingested}",
         f"Stop reason: {result.final_decision.reason}",
+    ]
+
+    # Reachability coverage — present only when deep-mode reachability ran.
+    # reachable_total is None in fast/auto mode, so the line is omitted
+    # cleanly rather than reporting a meaningless "0 reachable pages".
+    if result.reachable_total is not None:
+        pct = ""
+        if result.coverage_ratio is not None:
+            pct = f" ({result.coverage_ratio * 100:.0f}%)"
+        lines.append(
+            f"[COVERAGE] indexed {result.indexed_count} of "
+            f"~{result.reachable_total} reachable pages{pct}"
+        )
+
+    lines += [
         (
             f"Total time: {t.total_ms:.0f}ms "
             f"(analysis: {t.query_analysis_ms:.0f}ms, "

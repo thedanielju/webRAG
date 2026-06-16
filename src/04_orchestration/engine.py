@@ -160,9 +160,15 @@ class OrchestratorEngine:
         constraints: list[str] | None = None,
         expansion_budget: int | None = None,
         retrieval_mode: str | None = None,
+        research_mode: str | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> OrchestrationResult:
-        """Execute the full orchestration pipeline for a single request."""
+        """Execute the full orchestration pipeline for a single request.
+
+        ``research_mode`` ("fast" | "auto" | "deep") gates reachability:
+        only "deep" lets the expander enumerate the seed's reachable page
+        universe via Firecrawl /map and report coverage.
+        """
         total_start = time.perf_counter()
         timing = OrchestrationTiming()
 
@@ -176,6 +182,7 @@ class OrchestratorEngine:
         )
 
         context_budget = settings.retrieval_context_budget
+        resolved_research_mode = (research_mode or "fast").strip().lower()
 
         conn = await self._acquire_connection()
         try:
@@ -286,9 +293,14 @@ class OrchestratorEngine:
                         conn,
                         already_ingested_urls=state.ingested_urls,
                         current_depth=state.current_depth,
+                        research_mode=resolved_research_mode,
                     )
                     state.ingested_urls.update(outcome.urls_ingested)
                     state.current_depth = outcome.depth
+                    # Record the reachable universe size the first time a
+                    # deep-mode iteration maps it (None means it didn't run).
+                    if isinstance(outcome.reachable_total, int):
+                        state.reachable_total = outcome.reachable_total
 
                     # Re-retrieve over expanded corpus.
                     state.current_chunks, rr_timing = await self._retrieve_and_rerank(
@@ -436,6 +448,16 @@ class OrchestratorEngine:
             timing.total_ms = (time.perf_counter() - total_start) * 1000
             await _emit_progress(progress_callback, "run_done", total_ms=timing.total_ms, mode=mode)
 
+            # ── Reachability coverage ─────────────────────────
+            # Populated only when a deep-mode iteration mapped the seed
+            # origin (state.reachable_total is None otherwise, which keeps
+            # the coverage fields absent for fast/auto answers).
+            indexed_count = len(state.ingested_urls)
+            reachable_total = state.reachable_total
+            coverage_ratio: float | None = None
+            if reachable_total is not None and reachable_total > 0:
+                coverage_ratio = min(1.0, indexed_count / reachable_total)
+
             return OrchestrationResult(
                 chunks=final_chunks,
                 citations=citations,
@@ -447,6 +469,9 @@ class OrchestratorEngine:
                 final_decision=decision,
                 total_iterations=state.iteration,
                 total_urls_ingested=len(state.ingested_urls),
+                reachable_total=reachable_total,
+                indexed_count=indexed_count,
+                coverage_ratio=coverage_ratio,
             )
 
         finally:
