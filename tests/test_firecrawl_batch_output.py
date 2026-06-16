@@ -30,6 +30,7 @@ def _as_dict(result: Any) -> dict[str, Any]:
     return {}
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_firecrawl_batch_output():
     firecrawl_client = _import_client_or_skip()

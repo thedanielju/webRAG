@@ -54,6 +54,7 @@ def _metadata_dump(result: Any, payload: dict[str, Any]) -> dict[str, Any]:
 
 # calls the scrape wrapper, convert result to dict, print keys and a preview
 # and if the response isn't empty
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_firecrawl_scrape_smoke():
     firecrawl_client = _import_client_or_skip()
@@ -73,30 +74,18 @@ async def test_firecrawl_scrape_smoke():
     ), f"Unexpected scrape payload shape: {sorted(payload.keys())}"
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_firecrawl_map_smoke():
     firecrawl_client = _import_client_or_skip()
 
-    raw_map_result = await firecrawl_client.app.map(TEST_MAP_URL)
-    print("Raw SDK map type:", type(raw_map_result))
-
-    if hasattr(raw_map_result, "links"):
-        raw_links = raw_map_result.links
-    elif isinstance(raw_map_result, dict):
-        raw_links = raw_map_result.get("links", [])
-    elif isinstance(raw_map_result, list):
-        raw_links = raw_map_result
-    else:
-        raw_links = []
-
-    print("Raw SDK map first 5 links:\n", pformat(raw_links[:5]))
-    assert isinstance(raw_links, list), "SDK map did not return a list-like links payload"
-
-    try:
-        wrapper_links = await firecrawl_client.map(TEST_MAP_URL)
-    except ValueError as exc:
-        pytest.xfail(f"Wrapper map() does not yet handle SDK MapData response: {exc}")
-
+    # The public wrapper is map(url) — the old firecrawl_client.app.map()
+    # path no longer exists.  Exercise the wrapper directly.
+    wrapper_links = await firecrawl_client.map(TEST_MAP_URL)
+    print("Wrapper map type:", type(wrapper_links))
     print("Wrapper map link count:", len(wrapper_links))
-    print("First link item:", pformat(raw_links[0]))
-    assert isinstance(wrapper_links, list)
+    print("Wrapper map first 5 links:\n", pformat(wrapper_links[:5]))
+
+    assert isinstance(wrapper_links, list), (
+        "Wrapper map() did not return a list of links"
+    )

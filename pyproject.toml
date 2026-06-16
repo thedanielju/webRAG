@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "webrag"
-version = "0.1.0"
+version = "1.0.0"
 requires-python = ">=3.11"
 dependencies = [
     "firecrawl-py==4.16.0",
@@ -25,6 +25,12 @@ dependencies = [
     "cohere",
     "httpx",
     "mcp[cli]",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = [
+    "live: test makes real network / paid-API calls (Firecrawl, etc.); deselect in CI with -m 'not live'",
 ]
 
 [tool.setuptools]

@@ -85,9 +85,24 @@ def create_server() -> FastMCP:
             "Use the 'answer' tool to scrape + search a URL. "
             "Use 'search' to query already-indexed content. "
             "Use 'status' to check what's indexed. "
-            "Prefer fast passes first (chunked retrieval, no expansion by default). "
-            "If the tool suggests deeper linked-page expansion, ask the user before running a slower deep pass. "
-            "When citations are present, include them in your answer."
+            "Prefer fast passes first (chunked retrieval, no expansion by default)."
+            "\n\n"
+            "RESPONSE FORMAT REQUIREMENTS — follow these for every WebRAG tool result:\n"
+            "1. CITATIONS: Every factual claim in your response MUST include an "
+            "inline citation referencing the source, e.g. [Source 1] or [1]. Use "
+            "the [SOURCES] and [CITATIONS] sections to attribute claims. Never "
+            "omit citations.\n"
+            "2. EXPANSION TRACE: If the tool output contains an [EXPANSION TRACE] "
+            "section, reproduce the ASCII tree diagram in your response so the "
+            "user can see which linked pages were crawled and the traversal path.\n"
+            "3. FOLLOW-UP OPTIONS: If the tool output contains a [FOLLOW-UP OPTIONS] "
+            "section, present those options to the user at the end of your "
+            "response. If a deep recursive subtree search is suggested, ASK the "
+            "user before running it — do not auto-expand.\n"
+            "4. IMAGES: If the tool output contains an [IMAGES] section, include "
+            "relevant image references in your response.\n"
+            "5. Always synthesize a natural-language answer first, then include "
+            "citations, traces, and follow-up options. Do not dump raw tool output."
         ),
         lifespan=lifespan,
         host=settings.mcp_host,
@@ -108,7 +123,16 @@ def create_server() -> FastMCP:
             "chunked pass without expansion; use research_mode='deep' and/or "
             "retrieval_mode='full_context' only when the user requests a "
             "slower, more exhaustive search. Use this when you need "
-            "factual information grounded in specific web sources."
+            "factual information grounded in specific web sources.\n\n"
+            "OUTPUT FORMAT: The response contains these sections:\n"
+            "- [PRESENTATION GUIDE]: Instructions for formatting your response\n"
+            "- [SOURCES]: Numbered source list — reference these as [Source N]\n"
+            "- [EVIDENCE]: Ranked evidence chunks with relevance scores\n"
+            "- [IMAGES]: Image links with alt text (when images are found)\n"
+            "- [EXPANSION TRACE]: ASCII tree of crawled pages (when expansion occurred)\n"
+            "- [CITATIONS]: Exact quotes for attribution — always include these\n"
+            "- [STATS]: Performance and retrieval metadata\n"
+            "- [FOLLOW-UP OPTIONS]: Suggested next steps to offer the user"
         ),
     )
     mcp.add_tool(
@@ -120,7 +144,10 @@ def create_server() -> FastMCP:
             "when you know the content has already been indexed (e.g., "
             "from a previous answer call) and want to ask a different "
             "question about the same material. Faster than answer because "
-            "it skips ingestion and expansion."
+            "it skips ingestion and expansion.\n\n"
+            "OUTPUT FORMAT: Same section structure as the answer tool "
+            "([SOURCES], [EVIDENCE], [CITATIONS], [STATS], [FOLLOW-UP OPTIONS]). "
+            "Always include citations and follow-up options in your response."
         ),
     )
     mcp.add_tool(

@@ -1,4 +1,4 @@
-# Retrieval Layer Design — src/retrieval/
+# Retrieval Layer Design - src/retrieval/
 
 **Status:** Design complete, ready for implementation
 **Depends on:** Ingestion (complete), Indexing (complete)
@@ -42,28 +42,28 @@ Those responsibilities belong to the orchestration layer, which consumes retriev
 
 ### Pipeline Summary
 
-1. **Decide mode** — full-context (small corpus) vs chunk (large corpus) based on total corpus token span
-2. **Handle empty corpus fast path** — if total parent token span is zero, return immediately with empty results and no embedding call
-3. **Embed the query** — single OpenAI-compatible API call via embed_query() wrapper (only when corpus is non-empty)
-4. **Execute search** — full-context loads all parents; chunk mode runs HNSW + parent aggregation
-5. **Apply surface selection** — flag-based html_text vs chunk_text per chunk
-6. **Build return object** — rich RetrievalResult with chunks, metadata, corpus stats, timing
-7. **Return to orchestration** — orchestration decides next action
+1. **Decide mode:** full-context (small corpus) vs chunk (large corpus) based on total corpus token span
+2. **Handle empty corpus fast path:** if total parent token span is zero, return immediately with empty results and no embedding call
+3. **Embed the query:** single OpenAI-compatible API call via embed_query() wrapper (only when corpus is non-empty)
+4. **Execute search:** full-context loads all parents; chunk mode runs HNSW + parent aggregation
+5. **Apply surface selection:** flag-based html_text vs chunk_text per chunk
+6. **Build return object:** rich RetrievalResult with chunks, metadata, corpus stats, timing
+7. **Return to orchestration:** orchestration decides next action
 
 ### Architectural Pattern: Small-to-Large Retrieval
 
 Retrieval uses the **small-to-large** pattern (also called "parent document retrieval" in LlamaIndex/LangChain literature):
 
 - **Children are the search index.** HNSW finds them by embedding similarity. Small chunks (target 256 tokens) produce precise, focused embeddings that match specific query intents well.
-- **Parents are the context unit.** What actually gets returned to the LLM. Larger chunks (up to 1000 tokens) give the LLM enough surrounding context to reason correctly — a child hit about "learning rate" pulls in the full "Gradient Boosted Trees" section.
+- **Parents are the context unit.** What actually gets returned to the LLM. Larger chunks (up to 1000 tokens) give the LLM enough surrounding context to reason correctly. A child hit about "learning rate" pulls in the full "Gradient Boosted Trees" section.
 - **Deduplication happens at the parent level.** If 5 children from the same parent all match, the parent is returned once.
-- **Scoring uses max aggregation.** The best child score represents the parent. Max, not average — we want the strongest signal, not a diluted one.
+- **Scoring uses max aggregation.** The best child score represents the parent. Max, not average; we want the strongest signal, not a diluted one.
 - **Citation offsets remain precise.** Because children carry char_start/char_end from the original document, the specific matched child within a parent can still be cited exactly. The parent provides context; the child provides citation precision.
 
 This is the right pattern for WebRAG because:
-- Embedding precision scales inversely with chunk size — small chunks embed more precisely
-- LLM reasoning quality scales with available context — large chunks reason better
-- Citation reconstruction requires character-level offsets — children carry these from indexing
+- Embedding precision scales inversely with chunk size; small chunks embed more precisely
+- LLM reasoning quality scales with available context; large chunks reason better
+- Citation reconstruction requires character-level offsets; children carry these from indexing
 - The schema already supports it: children have embeddings + parent_id, parents have full section text
 
 ---
@@ -75,8 +75,8 @@ This is the right pattern for WebRAG because:
 | Library | Version | Usage in Retrieval |
 |---|---|---|
 | psycopg[binary] | 3.x | All database queries (connection, parameterized SQL, cursor iteration) |
-| pgvector.psycopg | — | register_vector(conn) for vector type adaptation (required on every connection) |
-| openai | >=1.0 | Query embedding via embed_query() — reuses the existing embedder.py client |
+| pgvector.psycopg | - | register_vector(conn) for vector type adaptation (required on every connection) |
+| openai | >=1.0 | Query embedding via embed_query(); reuses the existing embedder.py client |
 | pydantic | 2.x | RetrievalResult and RetrievedChunk models for the return contract |
 | pydantic-settings | 2.x | Config additions to Settings class |
 
@@ -91,7 +91,7 @@ None. Retrieval introduces **zero new dependencies**. All functionality is built
 | Library | Reason for exclusion |
 |---|---|
 | cohere / rerank APIs | Reranking is a v2 enhancement. Cosine similarity + depth decay is the v1 scoring pipeline. |
-| sentence-transformers | Cross-encoder reranking alternative. Same rationale — v2. |
+| sentence-transformers | Cross-encoder reranking alternative. Same rationale: v2. |
 | sqlalchemy | Project uses psycopg3 directly. No ORM layer. Consistent with indexing. |
 | numpy | Vector operations are handled by pgvector in SQL. No Python-side vector math needed. |
 
@@ -239,7 +239,7 @@ src/retrieval/
                        #   and verbatim span extraction
 ```
 
-No __init__.py required — project uses pyproject.toml with implicit namespace packages. Public API is imported directly from submodules:
+No __init__.py required; project uses pyproject.toml with implicit namespace packages. Public API is imported directly from submodules:
 
 ```python
 from src.retrieval.search import retrieve
@@ -334,13 +334,13 @@ def _determine_mode(
     return ("chunk", total_tokens)
 ```
 
-**Why sum parent token spans, not child:** Parents partition the document without overlap. Children subdivide parents and may have slight overlap at boundaries. Summing parent spans gives the true corpus size. This query is a single aggregate scan over the chunk_level index — fast.
+**Why sum parent token spans, not child:** Parents partition the document without overlap. Children subdivide parents and may have slight overlap at boundaries. Summing parent spans gives the true corpus size. This query is a single aggregate scan over the chunk_level index, and it's fast.
 
-**Why a fixed threshold vs something smarter:** A fixed threshold is predictable, configurable, and requires zero additional signals. The user knows: "below 30k tokens, my entire corpus goes to the LLM; above, vector search kicks in." No surprises. The alternative — estimating coverage confidence before searching — requires running the search first (circular) or an LLM call (expensive). The threshold is the simplest correct solution.
+**Why a fixed threshold vs something smarter:** A fixed threshold is predictable, configurable, and requires zero additional signals. The user knows: "below 30k tokens, my entire corpus goes to the LLM; above, vector search kicks in." No surprises. The alternative (estimating coverage confidence before searching) requires running the search first (circular) or an LLM call (expensive). The threshold is the simplest correct solution.
 
-**context_budget_override parameter:** Orchestration may know the model's context window (e.g., from MCP session metadata or user config). If so, it can pass a derived budget. Otherwise the default config kicks in. This is a forward-looking parameter — currently MCP does not expose model metadata, but the interface is ready when it does.
+**context_budget_override parameter:** Orchestration may know the model's context window (e.g., from MCP session metadata or user config). If so, it can pass a derived budget. Otherwise the default config kicks in. This is a forward-looking parameter; currently MCP does not expose model metadata, but the interface is ready when it does.
 
-**Edge case:** If total_tokens is 0 (empty corpus), mode is "full_context" and retrieval returns an empty result set immediately without calling the embedding API. Orchestration handles this — it sees zero chunks returned and triggers ingestion.
+**Edge case:** If total_tokens is 0 (empty corpus), mode is "full_context" and retrieval returns an empty result set immediately without calling the embedding API. Orchestration handles this; it sees zero chunks returned and triggers ingestion.
 
 ---
 
@@ -465,11 +465,11 @@ LIMIT %s;
 ```
 
 Parameters:
-- %s::vector — the query embedding (passed twice: once for distance calc in SELECT, once for WHERE filter)
-- %s (WHERE distance threshold) — 1.0 - settings.retrieval_similarity_floor (cosine distance = 1 - similarity; floor of 0.3 similarity = distance threshold of 0.7)
-- %s (LIMIT) — settings.retrieval_top_k_children_limit (default 60)
+- %s::vector: the query embedding (passed twice: once for distance calc in SELECT, once for WHERE filter)
+- %s (WHERE distance threshold): 1.0 - settings.retrieval_similarity_floor (cosine distance = 1 - similarity; floor of 0.3 similarity = distance threshold of 0.7)
+- %s (LIMIT): settings.retrieval_top_k_children_limit (default 60)
 
-**Cosine distance vs similarity — critical conversion:**
+**Cosine distance vs similarity - critical conversion:**
 pgvector's <=> operator returns **distance** (0 = identical, 2 = opposite). Our config uses **similarity** (1 = identical, 0 = orthogonal). Conversion:
 
     distance = 1.0 - similarity
@@ -478,14 +478,14 @@ pgvector's <=> operator returns **distance** (0 = identical, 2 = opposite). Our 
 All user-facing config and return values use **similarity**. SQL uses **distance** internally. search.py handles the conversion at query construction and result parsing.
 
 **Why the distance WHERE clause in SQL (not just app-layer filtering):**
-The SQL distance filter gives pgvector's HNSW index a pruning hint — it can terminate graph traversal early when remaining candidates exceed the threshold. This is a meaningful performance optimization. The threshold of 0.7 distance (0.3 similarity) is extremely permissive — a truly relevant chunk will not score below 0.3 cosine similarity against a reasonable query.
+The SQL distance filter gives pgvector's HNSW index a pruning hint; it can terminate graph traversal early when remaining candidates exceed the threshold. This is a meaningful performance optimization. The threshold of 0.7 distance (0.3 similarity) is extremely permissive, and a truly relevant chunk will not score below 0.3 cosine similarity against a reasonable query.
 
-**Justification for SQL-level filtering over app-layer-only:** For v1, the simplicity of a single SQL query with the exact threshold outweighs the marginal recall risk at the boundary. HNSW is approximate, so in theory a relevant chunk could be slightly misranked and excluded. In practice, at a 0.3 floor, this risk is negligible — a chunk at the boundary is barely related to the query. If recall issues surface during testing, the mitigation is to move the floor to the app layer (fetch more candidates from SQL, filter in Python). This is flagged as a tuning option, not a v1 requirement.
+**Justification for SQL-level filtering over app-layer-only:** For v1, the simplicity of a single SQL query with the exact threshold outweighs the marginal recall risk at the boundary. HNSW is approximate, so in theory a relevant chunk could be slightly misranked and excluded. In practice, at a 0.3 floor, this risk is negligible; a chunk at the boundary is barely related to the query. If recall issues surface during testing, the mitigation is to move the floor to the app layer (fetch more candidates from SQL, filter in Python). This is flagged as a tuning option, not a v1 requirement.
 
 **Why adaptive instead of fixed top_k:** The similarity floor + hard ceiling approach is naturally adaptive:
-- Precise query on well-indexed corpus: maybe 15 children above floor — 15 returned
-- Vague query: maybe 55 children above floor — 55 returned (up to ceiling)
-- Off-topic query: maybe 2 children above floor — 2 returned (orchestration sees sparse results)
+- Precise query on well-indexed corpus: maybe 15 children above floor, 15 returned
+- Vague query: maybe 55 children above floor, 55 returned (up to ceiling)
+- Off-topic query: maybe 2 children above floor, 2 returned (orchestration sees sparse results)
 - HNSW search cost is logarithmic regardless of k, so over-fetching is cheap
 
 **Index usage:** This query uses the partial HNSW index chunks_embedding_hnsw_idx ON chunks USING hnsw (embedding vector_cosine_ops) WHERE chunk_level = 'child' AND embedding IS NOT NULL. The WHERE clause in the query matches the index predicate exactly, ensuring pgvector uses the index.
@@ -519,7 +519,7 @@ for parent_id, children in parent_groups.items():
 scored_parents.sort(key=lambda x: x[1], reverse=True)
 ```
 
-**Why max aggregation, not average:** If a parent has one highly relevant child and four irrelevant ones, the average dilutes the signal. Max says "the best evidence in this section is X good" — which is what matters for deciding if this section should be included in context. Average penalizes sections that contain both relevant and irrelevant subsections, which is common in documentation.
+**Why max aggregation, not average:** If a parent has one highly relevant child and four irrelevant ones, the average dilutes the signal. Max says "the best evidence in this section is X good," which is what matters for deciding if this section should be included in context. Average penalizes sections that contain both relevant and irrelevant subsections, which is common in documentation.
 
 ### Step 8.4: Depth Scoring Details
 
@@ -531,13 +531,13 @@ With defaults (decay_rate=0.05, floor=0.80):
 
 | Depth | Multiplier | Effect |
 |---|---|---|
-| 0 (seed page) | 1.00 | No penalty — user explicitly asked about this |
-| 1 | 0.95 | Slight penalty — one link away from seed |
+| 0 (seed page) | 1.00 | No penalty: user explicitly asked about this |
+| 1 | 0.95 | Slight penalty: one link away from seed |
 | 2 | 0.90 | Moderate penalty |
 | 3 | 0.85 | |
-| 4+ | 0.80 | Floor — deep pages not penalized further |
+| 4+ | 0.80 | Floor: deep pages not penalized further |
 
-**Worked example:** A depth-3 chunk with 0.90 raw similarity scores 0.90 * 0.85 = 0.765. A depth-0 chunk with 0.72 raw similarity scores 0.72 * 1.0 = 0.72. The deeper chunk still wins — similarity dominates. Depth only matters when similarity is close.
+**Worked example:** A depth-3 chunk with 0.90 raw similarity scores 0.90 * 0.85 = 0.765. A depth-0 chunk with 0.72 raw similarity scores 0.72 * 1.0 = 0.72. The deeper chunk still wins; similarity dominates. Depth only matters when similarity is close.
 
 **Multi-page scenario:** If the corpus has 6 pages and all 6 have relevant chunks above the similarity floor, all 6 contribute parent chunks. Depth scoring only determines the *ordering* among them. If the token budget accommodates all of them, all are returned. If the budget forces truncation, the highest-scored parents (combining similarity and depth) survive.
 
@@ -562,9 +562,9 @@ for parent_id, score, best_child, children in scored_parents:
     accumulated_tokens += parent_tokens
 ```
 
-**Why accumulate at parent level:** Parents are the context unit — the text that actually goes to the LLM. Budgeting at the parent level gives predictable, bounded output. The alternative (budgeting at child level then fetching parents) could overshoot wildly if a small child pulls in a large parent.
+**Why accumulate at parent level:** Parents are the context unit, the text that actually goes to the LLM. Budgeting at the parent level gives predictable, bounded output. The alternative (budgeting at child level then fetching parents) could overshoot wildly if a small child pulls in a large parent.
 
-**Always return at least one result.** Even if the single best parent exceeds the budget, return it. An oversized result is better than an empty one — orchestration can handle the edge case.
+**Always return at least one result.** Even if the single best parent exceeds the budget, return it. An oversized result is better than an empty one; orchestration can handle the edge case.
 
 ### Step 8.6: Fetch Full Parent Rows
 
@@ -662,7 +662,7 @@ def _select_surface(chunk_row) -> tuple[str, str]:
 
 **has_steps does NOT trigger html_text.** Steps chunks that have html_text got it from a co-occurring flag (e.g., has_code + has_steps). The has_steps flag signals retrieval/MCP for UX treatment only.
 
-### Parent Surface Readiness — Confirmed Correct
+### Parent Surface Readiness: Confirmed Correct
 
 Retrieval returns parent chunks in both modes, so parent rows must be surface-ready.
 This is now true in the indexing pipeline:
@@ -812,7 +812,7 @@ class RetrievalResult(BaseModel):
 
 **raw_similarity separate from score:** Orchestration might want to see both the pre-adjustment similarity and the post-depth-adjustment score. This supports debugging and allows orchestration to apply its own scoring adjustments without reverse-engineering depth decay.
 
-**documents_matched in CorpusStats:** Orchestration needs to know which pages contributed evidence vs which were searched but yielded nothing. This drives expansion decisions: "I have 6 pages indexed but only 2 contributed results — should I explore more links from the contributing pages?"
+**documents_matched in CorpusStats:** Orchestration needs to know which pages contributed evidence vs which were searched but yielded nothing. This drives expansion decisions: "I have 6 pages indexed but only 2 contributed results. Should I explore more links from the contributing pages?"
 
 **All Pydantic BaseModel, no dataclasses.** Consistent with the rest of the codebase (config.py uses pydantic-settings). Pydantic provides validation, serialization, and model_dump() for free.
 
@@ -898,20 +898,20 @@ def extract_citation(
 
 1. **Retrieval** returns RetrievedChunk objects with char_start, char_end, source_url, section_heading.
 2. **The LLM** generates an answer. When it quotes text, it should reference the chunk's char offsets (the MCP layer instructs it to do this via system prompt).
-3. **Citation verification** uses extract_citation() to confirm the LLM's quoted span actually exists in the source material at the claimed offsets. This is a deterministic O(1) lookup — not fuzzy matching, not LLM-based.
+3. **Citation verification** uses extract_citation() to confirm the LLM's quoted span actually exists in the source material at the claimed offsets. This is a deterministic O(1) lookup, not fuzzy matching or LLM-based.
 4. **The response** includes a citations block at the bottom with [source_url#section_heading] for each cited span. If a verbatim quote already appears in the answer prose, the citation supplies attribution only without re-quoting.
 
 ### Why Char Offsets Are Critical
 
 Char offsets prevent hallucinated citations. Without them, you'd need fuzzy string matching to verify quotes (slow, unreliable) or trust the LLM's self-reported sources (risky). With offsets, citation verification is: "does document_text[char_start:char_end] match the quoted span? Yes/no." Binary, fast, trustworthy.
 
-This is enabled by indexing: every chunk carries char_start and char_end relative to the original document markdown. These survive through the entire pipeline — ingestion to indexing to retrieval to citation.
+This is enabled by indexing: every chunk carries char_start and char_end relative to the original document markdown. These survive through the entire pipeline, from ingestion to indexing to retrieval to citation.
 
 ---
 
 ## 12. Image Handling at Retrieval Time
 
-Indexing preserves ![alt text](url) as-is in chunk_text. No has_image flag exists — images don't need HTML fallback since Firecrawl preserves them faithfully in markdown with absolute URLs.
+Indexing preserves ![alt text](url) as-is in chunk_text. No has_image flag exists; images don't need HTML fallback since Firecrawl preserves them faithfully in markdown with absolute URLs.
 
 ### Retrieval's Responsibility
 
@@ -923,7 +923,7 @@ At response assembly time, the MCP layer decides per-image:
 - If the image URL appears in a retrieved chunk being sent to the LLM **and** alt text is meaningful or the image is contextually relevant: fetch and pass alongside as a vision input
 - Otherwise: pass alt text + URL as a text reference
 
-**Alt text quality varies by source:** Wikipedia often has empty alt text; scikit-learn uses filename-based alt text. The MCP layer should not assume alt text is always informative. This is an MCP/orchestration concern, not a retrieval concern — noted here so the design is complete.
+**Alt text quality varies by source:** Wikipedia often has empty alt text; scikit-learn uses filename-based alt text. The MCP layer should not assume alt text is always informative. This is an MCP/orchestration concern, not a retrieval concern; noted here so the design is complete.
 
 ---
 
@@ -972,13 +972,13 @@ WHERE source_url = ANY(%s);
 
 **Index used:** documents_source_url_key (unique index)
 
-### Q3: Full-Context — Load All Parents
+### Q3: Full-Context: Load All Parents
 
 See Section 7 for both variants (with/without filter).
 
 **Index used:** chunks_chunk_level_idx
 
-### Q4: Chunk Mode — HNSW Search Over Children
+### Q4: Chunk Mode: HNSW Search Over Children
 
 See Section 8, Step 8.2 for both variants (with/without filter).
 
@@ -1081,7 +1081,7 @@ Test with the three existing indexed documents (scikit-learn ensemble, Python gl
 
 After HNSW retrieval and parent aggregation, add an optional reranking pass:
 - Cross-encoder model (sentence-transformers) or API (Cohere Rerank)
-- Rerank the selected parent chunks (not all children — too many)
+- Rerank the selected parent chunks (not all children; too many)
 - Config: RETRIEVAL_RERANK_ENABLED=false, RETRIEVAL_RERANK_MODEL, RETRIEVAL_RERANK_API_KEY
 - Reranking only applies in chunk mode (full-context returns everything)
 
@@ -1091,17 +1091,17 @@ Combine vector similarity with keyword matching (BM25). Useful for queries conta
 
 ### 15.3 Orchestration Loop Ownership
 
-**FLAG FOR ORCHESTRATION DESIGN — do not resolve in retrieval.**
+**FLAG FOR ORCHESTRATION DESIGN: do not resolve in retrieval.**
 
 Who drives the retrieve then expand then re-retrieve loop?
 
 **Option A: Internal orchestration.** WebRAG's orchestrator makes its own LLM API calls to judge coverage sufficiency and drive expansion. WebRAG controls the loop end-to-end. Cost: additional API calls and latency. Benefit: self-contained system.
 
-**Option B: LLM-driven orchestration.** WebRAG exposes retrieve() and expand() as separate MCP tools. The reasoning LLM (Claude/ChatGPT — the user's subscription model) calls retrieve(), examines results, decides if expansion is needed, calls expand(), then retrieve() again. The sufficiency judgment is "free" for subscription users because it happens in their existing chat session.
+**Option B: LLM-driven orchestration.** WebRAG exposes retrieve() and expand() as separate MCP tools. The reasoning LLM (Claude/ChatGPT, the user's subscription model) calls retrieve(), examines results, decides if expansion is needed, calls expand(), then retrieve() again. The sufficiency judgment is "free" for subscription users because it happens in their existing chat session.
 
 **Option C: Hybrid.** Score-based heuristics as fast gate; LLM judgment for ambiguous cases.
 
-This decision fundamentally shapes orchestration architecture, MCP tool design, and cost model. Retrieval's return contract (Section 10) is designed to support all three options — it provides rich enough data for any coverage judgment strategy.
+This decision fundamentally shapes orchestration architecture, MCP tool design, and cost model. Retrieval's return contract (Section 10) is designed to support all three options, providing rich enough data for any coverage judgment strategy.
 
 ### 15.4 Math Rendering
 
@@ -1127,9 +1127,9 @@ Currently MCP does not expose which model is calling WebRAG or its context windo
 
 retrieve() accepts a psycopg.Connection as its first parameter. The caller (orchestration/MCP layer) is responsible for:
 
-1. **Connection is active** and connected to the WebRAG database using postgresql:// DSN format (e.g., postgresql://webrag:webrag@localhost:5432/webrag). Do NOT use postgresql+psycopg:// — that is SQLAlchemy syntax and is incorrect for this project.
-2. **register_vector(conn) has been called** on this connection (from pgvector.psycopg). Without this, pgvector's vector type adaptation fails and embedding queries will error. The indexing layer already does this — use the same connection setup pattern.
-3. **Schema exists** — init_schema(conn) has been run at least once (tables and indexes exist). Retrieval does not create or modify schema.
+1. **Connection is active** and connected to the WebRAG database using postgresql:// DSN format (e.g., postgresql://webrag:webrag@localhost:5432/webrag). Do NOT use postgresql+psycopg:// (that is SQLAlchemy syntax and is incorrect for this project).
+2. **register_vector(conn) has been called** on this connection (from pgvector.psycopg). Without this, pgvector's vector type adaptation fails and embedding queries will error. The indexing layer already does this; use the same connection setup pattern.
+3. **Schema exists:** init_schema(conn) has been run at least once (tables and indexes exist). Retrieval does not create or modify schema.
 
 Example connection setup (for reference, not retrieval's responsibility):
 
@@ -1143,14 +1143,14 @@ register_vector(conn)
 
 ### File Creation Order
 
-1. src/retrieval/models.py — define all Pydantic models first (other modules import them)
-2. Add embed_query() to src/indexing/embedder.py — single function addition, required
-3. Add retrieval config fields to config.py — extend Settings class
-4. Update blank.env — add commented retrieval config section
-5. src/retrieval/citations.py — CitationSpan model + extract_citation()
-6. src/retrieval/search.py — core search logic (imports models, embedder, config)
+1. src/retrieval/models.py: define all Pydantic models first (other modules import them)
+2. Add embed_query() to src/indexing/embedder.py: single function addition, required
+3. Add retrieval config fields to config.py: extend Settings class
+4. Update blank.env: add commented retrieval config section
+5. src/retrieval/citations.py: CitationSpan model + extract_citation()
+6. src/retrieval/search.py: core search logic (imports models, embedder, config)
 
-No __init__.py needed — project uses pyproject.toml with implicit namespace packages.
+No __init__.py needed; project uses pyproject.toml with implicit namespace packages.
 
 ### Key Implementation Details
 
@@ -1160,7 +1160,7 @@ No __init__.py needed — project uses pyproject.toml with implicit namespace pa
 - **Timing:** Use time.perf_counter() around embed and search sections. Report in milliseconds.
 - **UUID handling:** psycopg3 natively handles Python uuid.UUID to PostgreSQL UUID conversion. No string casting needed.
 - **Vector passing:** psycopg3 with pgvector sends embeddings as Python lists of floats. Cast to ::vector in SQL. Requires register_vector(conn) (caller's responsibility, see Connection Preconditions above).
-- **Error handling:** If the corpus is empty (no documents/chunks), return an empty RetrievalResult with mode="full_context", empty chunks, and zeroed corpus stats. Don't raise — let orchestration handle it.
+- **Error handling:** If the corpus is empty (no documents/chunks), return an empty RetrievalResult with mode="full_context", empty chunks, and zeroed corpus stats. Don't raise; let orchestration handle it.
 - **No async:** Retrieval uses synchronous psycopg3, consistent with the rest of the codebase. The embedding API call is the only I/O besides DB queries, and it's a single request (no batching needed).
 
 ### Inline Comment and Docstring Standards

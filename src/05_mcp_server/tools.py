@@ -140,6 +140,11 @@ async def _mcp_progress_notifier(ctx: Context, phase: str, data: dict[str, Any])
             f"score→{float(data.get('top_score_after', 0.0)):.2f}, "
             f"{float(data.get('duration_ms', 0.0)):.0f}ms."
         )
+    elif phase == "backstop_tripped":
+        await ctx.info(
+            f"Recursion halted by safety backstop ({data.get('stop_reason', 'n/a')}): "
+            f"{data.get('pages', 0)} pages, depth {data.get('depth', 0)}."
+        )
     elif phase == "locality_start":
         await ctx.info("Applying locality expansion…")
     elif phase == "merge_start":
@@ -151,29 +156,6 @@ async def _mcp_progress_notifier(ctx: Context, phase: str, data: dict[str, Any])
             f"Orchestration complete ({float(data.get('total_ms', 0.0)):.0f}ms total)."
         )
 
-
-def _append_next_step_recommendation(
-    response_text: str,
-    *,
-    result: Any,
-    research_mode: Literal["fast", "auto", "deep"],
-    retrieval_mode: Literal["chunk", "full_context", "auto"],
-) -> str:
-    if not settings.mcp_enable_expansion_recommendations:
-        return response_text
-    if research_mode != "fast":
-        return response_text
-    if getattr(result, "expansion_steps", None):
-        return response_text
-
-    note = (
-        "[NEXT STEP]\n"
-        "This was a fast pass (chunked retrieval, no expansion by default). "
-        "If the user wants broader multi-page coverage, ask before proceeding with a slower deep pass.\n"
-        "- Suggested deep follow-up: research_mode=\"deep\", expansion_budget=3\n"
-        "- Suggested exhaustive single-source follow-up: retrieval_mode=\"full_context\""
-    )
-    return f"{response_text}\n\n{note}"
 
 
 # ── answer ────────────────────────────────────────────────────
@@ -253,6 +235,7 @@ async def answer(
                 constraints=constraints,
                 expansion_budget=effective_expansion_budget,
                 retrieval_mode=resolved_retrieval_mode,
+                research_mode=resolved_research_mode,
                 progress_callback=lambda phase, data: _mcp_progress_notifier(ctx, phase, data),
             ),
             timeout=settings.mcp_tool_timeout,
@@ -280,10 +263,8 @@ async def answer(
         f"({result.timing.total_ms:.0f}ms total)…"
     )
     await ctx.info("Building final MCP response (preserving citations/images)…")
-    response_text = format_result(result)
-    return _append_next_step_recommendation(
-        response_text,
-        result=result,
+    return format_result(
+        result,
         research_mode=resolved_research_mode,
         retrieval_mode=resolved_retrieval_mode,
     )
@@ -424,7 +405,11 @@ async def search(
         total_urls_ingested=0,
     )
 
-    return format_result(result)
+    return format_result(
+        result,
+        research_mode="fast",
+        retrieval_mode=resolved_retrieval_mode,
+    )
 
 
 # ── status ────────────────────────────────────────────────────

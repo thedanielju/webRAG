@@ -27,6 +27,35 @@ def _build(markdown: str, html: str | None):
     )
 
 
+def test_latex_in_raw_markdown_sets_has_math():
+    # Raw-path content preserves LaTeX (Firecrawl strips it).  The chunker
+    # must flag math from markdown delimiters even when the HTML carries no
+    # MathJax/KaTeX markup.
+    markdown = """# Physics
+
+The mass-energy relation is $$E = mc^2$$ shown in display form.
+
+Inline Pythagorean form: \\(a^2 + b^2 = c^2\\).
+"""
+    html = "<html><body><h1>Physics</h1><p>The mass-energy relation.</p></body></html>"
+
+    parents, children = _build(markdown, html)
+    assert any(child.flags.has_math for child in children)
+    assert any(parent.flags.has_math for parent in parents)
+
+
+def test_plain_currency_does_not_set_has_math():
+    # Bare dollar amounts must not false-positive as LaTeX inline math.
+    markdown = """# Pricing
+
+The plan costs $5 per month, or $50 per year.
+"""
+    html = "<html><body><h1>Pricing</h1><p>The plan costs.</p></body></html>"
+
+    parents, children = _build(markdown, html)
+    assert all(child.flags.has_math is False for child in children)
+
+
 def test_chunks_with_no_images_have_no_image_signal():
     markdown = """# Title
 

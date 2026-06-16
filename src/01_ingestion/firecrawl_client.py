@@ -51,6 +51,19 @@ def _normalize_url_for_match(url: str | None) -> str:
     return f"{parsed.scheme}://{parsed.netloc}{normalized_path}"
 
 
+def _normalize_origin(url: str | None) -> str:
+    """Reduce a URL to scheme://netloc — the cache key for map results.
+
+    All pages on the same origin share one reachable set, so keying the
+    cache by origin lets repeated deep calls in one answer reuse a single
+    /map round-trip regardless of which page on the site triggered it.
+    """
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 def _extract_batch_documents(response: Any) -> list[Any]:
     if isinstance(response, list):
         return response
@@ -117,3 +130,38 @@ async def map(url: str, limit: int = settings.firecrawl_map_default_limit) -> li
         return response.links
 
     raise ValueError("Unexpected response shape from Firecrawl map endpoint.")
+
+
+# ── Reachability map cache ────────────────────────────────────────
+# Orchestration calls map() once per origin to enumerate the reachable
+# page universe, but a single deep answer may revisit the same origin
+# across expansion iterations.  Cache the reachable set per normalized
+# origin so those repeats reuse the first round-trip rather than
+# re-billing Firecrawl.  Process-local and unbounded — answers are
+# short-lived and touch few origins, so a plain dict is sufficient.
+
+_map_cache: dict[str, list[Any]] = {}
+
+
+async def map_reachable(
+    url: str, limit: int = settings.firecrawl_map_default_limit
+) -> list[Any]:
+    """Return the reachable link set for *url*'s origin, cached per origin.
+
+    Thin wrapper over ``map()`` that memoizes on the normalized origin.
+    The first call for an origin hits Firecrawl; subsequent calls in the
+    same process reuse the cached list (the *limit* of the first call
+    wins for that origin).
+    """
+    origin = _normalize_origin(url)
+    if origin in _map_cache:
+        return _map_cache[origin]
+
+    links = await map(url, limit=limit)
+    _map_cache[origin] = links
+    return links
+
+
+def clear_map_cache() -> None:
+    """Drop all cached reachable sets (mainly for tests / long sessions)."""
+    _map_cache.clear()

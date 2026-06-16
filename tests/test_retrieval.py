@@ -68,6 +68,7 @@ def _token_span_sum(chunks: list[Any]) -> int:
     return sum(max(0, int(chunk.token_end) - int(chunk.token_start)) for chunk in chunks)
 
 
+@pytest.mark.live
 @pytest.mark.usefixtures("indexed_corpus")
 class TestRetrievalIntegration:
     @pytest.mark.asyncio(loop_scope="session")

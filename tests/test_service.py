@@ -50,6 +50,7 @@ async def test_ingest_html():
     print("ingest(html) links count:", len(result.links))
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_ingest_pdf():
     LinkCandidate, NormalizedDocument, discover_links, ingest, ingest_batch = _import_or_skip()
@@ -84,6 +85,7 @@ async def test_ingest_batch():
     print("ingest_batch valid markdown preview:\n", (valid_result.markdown or "")[:300])
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_discover_links():
     LinkCandidate, NormalizedDocument, discover_links, ingest, ingest_batch = _import_or_skip()

@@ -22,6 +22,8 @@ from config import settings
 def init_schema(conn: Connection) -> None:
     with conn.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        # link_candidates.id uses gen_random_uuid()
+        cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
 
         cur.execute(
             """

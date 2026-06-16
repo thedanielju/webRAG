@@ -1256,6 +1256,310 @@ class TestExpanderParentURLDerivation:
 
 
 # ===================================================================
+# 1.5b  Reachability Frontier + Coverage Tests
+# ===================================================================
+
+class TestReachabilityFrontier:
+    """Test the deep-mode reachability frontier (Firecrawl /map)."""
+
+    @pytest.mark.asyncio
+    async def test_frontier_normalizes_and_dedups(self):
+        """_fetch_reachable_frontier strips fragments/trailing slashes
+        and deduplicates while preserving first-seen order."""
+        from src.orchestration import expander
+
+        # Mixed shapes (objects + dicts), fragments, trailing slashes,
+        # and an exact duplicate that should collapse after normalization.
+        raw_links = [
+            {"url": "https://example.com/docs/a/"},
+            {"url": "https://example.com/docs/a#section"},  # dup of above
+            {"url": "https://example.com/docs/b"},
+            {"url": None},                                  # non-str url → skip
+            {"no_url_key": True},                           # missing url → skip
+        ]
+
+        map_mock = AsyncMock(return_value=raw_links)
+        with patch.object(expander.firecrawl_client, "map_reachable", map_mock):
+            frontier = await expander._fetch_reachable_frontier(
+                "https://example.com/docs/a"
+            )
+
+        assert frontier == [
+            "https://example.com/docs/a",
+            "https://example.com/docs/b",
+        ]
+        map_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_frontier_returns_none_on_map_failure(self):
+        """A /map failure yields None (not []) so callers distinguish
+        'reachability didn't run' from 'ran but empty'."""
+        from src.orchestration import expander
+
+        map_mock = AsyncMock(side_effect=RuntimeError("firecrawl down"))
+        with patch.object(expander.firecrawl_client, "map_reachable", map_mock):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                frontier = await expander._fetch_reachable_frontier(
+                    "https://example.com/docs/a"
+                )
+
+        assert frontier is None
+
+    @pytest.mark.asyncio
+    async def test_fast_mode_does_not_call_map(self):
+        """Fast mode must never trigger the reachability /map call."""
+        from src.orchestration import expander
+
+        map_mock = AsyncMock(return_value=[])
+        with patch.object(expander, "_get_source_document_ids",
+                          new_callable=AsyncMock, return_value=[]):
+            with patch.object(expander, "ingest", new_callable=AsyncMock):
+                with patch.object(expander, "index_batch", new_callable=AsyncMock):
+                    with patch.object(expander.firecrawl_client,
+                                      "map_reachable", map_mock):
+                        outcome = await expander.expand(
+                            "https://example.com/docs/page.html",
+                            "test query",
+                            _make_query_analysis(),
+                            MagicMock(),
+                            already_ingested_urls=set(),
+                            current_depth=0,
+                            research_mode="fast",
+                        )
+
+        map_mock.assert_not_awaited()
+        assert outcome.reachable_total is None
+
+    @pytest.mark.asyncio
+    async def test_deep_mode_folds_reachable_urls_into_universe(self):
+        """Deep mode maps the seed origin and the reachable URLs become
+        scorable candidates (recorded as reachable_total)."""
+        from src.orchestration import expander
+
+        reachable = [
+            {"url": "https://example.com/docs/guide"},
+            {"url": "https://example.com/docs/reference"},
+            {"url": "https://example.com/docs/tutorial"},
+        ]
+        map_mock = AsyncMock(return_value=reachable)
+        # Capture what score_candidates is asked to rank.
+        captured: dict[str, Any] = {}
+
+        async def _fake_score(cands, *a, **kw):
+            captured["urls"] = [c.target_url for c in cands]
+            return []  # no selection → short-circuit before scrape/index
+
+        with patch.object(expander, "_get_source_document_ids",
+                          new_callable=AsyncMock, return_value=[]):
+            with patch.object(expander, "score_candidates",
+                              side_effect=_fake_score):
+                with patch.object(expander.firecrawl_client,
+                                  "map_reachable", map_mock):
+                    with _override_settings(reachability_enabled=True):
+                        outcome = await expander.expand(
+                            "https://example.com/docs/page.html",
+                            "test query",
+                            _make_query_analysis(),
+                            MagicMock(),
+                            already_ingested_urls=set(),
+                            current_depth=0,
+                            research_mode="deep",
+                        )
+
+        map_mock.assert_awaited_once()
+        assert outcome.reachable_total == 3
+        # Every reachable URL was offered to the scorer.
+        for url in (
+            "https://example.com/docs/guide",
+            "https://example.com/docs/reference",
+            "https://example.com/docs/tutorial",
+        ):
+            assert url in captured["urls"]
+
+    @pytest.mark.asyncio
+    async def test_reachability_disabled_skips_map_in_deep_mode(self):
+        """REACHABILITY_ENABLED=false suppresses the /map call even in
+        deep mode."""
+        from src.orchestration import expander
+
+        map_mock = AsyncMock(return_value=[])
+        with patch.object(expander, "_get_source_document_ids",
+                          new_callable=AsyncMock, return_value=[]):
+            with patch.object(expander, "ingest", new_callable=AsyncMock):
+                with patch.object(expander, "index_batch", new_callable=AsyncMock):
+                    with patch.object(expander.firecrawl_client,
+                                      "map_reachable", map_mock):
+                        with _override_settings(reachability_enabled=False):
+                            outcome = await expander.expand(
+                                "https://example.com/docs/page.html",
+                                "test query",
+                                _make_query_analysis(),
+                                MagicMock(),
+                                already_ingested_urls=set(),
+                                current_depth=0,
+                                research_mode="deep",
+                            )
+
+        map_mock.assert_not_awaited()
+        assert outcome.reachable_total is None
+
+
+class TestReachabilityCoverageMath:
+    """Test coverage_ratio computation on OrchestrationResult."""
+
+    def _make_result(
+        self, *, reachable_total, indexed_count, coverage_ratio,
+    ) -> Any:
+        from src.orchestration.models import OrchestrationResult, OrchestrationTiming
+
+        return OrchestrationResult(
+            chunks=[],
+            citations=[],
+            query_analysis=_make_query_analysis(),
+            expansion_steps=[],
+            corpus_stats=CorpusStats(
+                total_documents=1, total_parent_chunks=1,
+                total_tokens=10, documents_matched=[],
+            ),
+            timing=OrchestrationTiming(),
+            mode="chunk",
+            final_decision=ExpansionDecision(
+                action="stop", reason="done", confidence="high",
+            ),
+            total_iterations=1,
+            total_urls_ingested=indexed_count,
+            reachable_total=reachable_total,
+            indexed_count=indexed_count,
+            coverage_ratio=coverage_ratio,
+        )
+
+    def test_coverage_ratio_partial(self):
+        # 12 of 40 → 0.30.
+        ratio = min(1.0, 12 / 40)
+        result = self._make_result(
+            reachable_total=40, indexed_count=12, coverage_ratio=ratio,
+        )
+        assert result.coverage_ratio == pytest.approx(0.30)
+
+    def test_coverage_ratio_clamped_at_one(self):
+        # indexed can exceed the mapped universe (parent URLs, off-origin
+        # links); coverage must clamp to 1.0 rather than exceed it.
+        ratio = min(1.0, 50 / 40)
+        result = self._make_result(
+            reachable_total=40, indexed_count=50, coverage_ratio=ratio,
+        )
+        assert result.coverage_ratio == 1.0
+
+    def test_coverage_fields_absent_in_fast_mode(self):
+        # No reachability → fields stay None / 0 and the formatter omits
+        # the [COVERAGE] line.
+        result = self._make_result(
+            reachable_total=None, indexed_count=3, coverage_ratio=None,
+        )
+        assert result.reachable_total is None
+        assert result.coverage_ratio is None
+
+    def test_formatter_emits_coverage_line_only_when_reachability_ran(self):
+        from src.mcp_server.formatter import _build_stats
+
+        deep = self._make_result(
+            reachable_total=40, indexed_count=12, coverage_ratio=0.30,
+        )
+        fast = self._make_result(
+            reachable_total=None, indexed_count=3, coverage_ratio=None,
+        )
+
+        deep_stats = _build_stats(deep)
+        fast_stats = _build_stats(fast)
+
+        assert "[COVERAGE] indexed 12 of ~40 reachable pages" in deep_stats
+        assert "(30%)" in deep_stats
+        assert "[COVERAGE]" not in fast_stats
+
+
+class TestFormatterSearchDepthLine:
+    """The [SEARCH] depth/stop line appears for deep runs, not fast ones."""
+
+    def _make_result(self, *, expansion_steps, max_depth_reached, stop_reason):
+        from src.orchestration.models import (
+            OrchestrationResult,
+            OrchestrationTiming,
+        )
+
+        return OrchestrationResult(
+            chunks=[],
+            citations=[],
+            query_analysis=_make_query_analysis(),
+            expansion_steps=expansion_steps,
+            corpus_stats=CorpusStats(
+                total_documents=1, total_parent_chunks=1,
+                total_tokens=10, documents_matched=[],
+            ),
+            timing=OrchestrationTiming(),
+            mode="chunk",
+            final_decision=ExpansionDecision(
+                action="stop", reason="done", confidence="high",
+            ),
+            total_iterations=len(expansion_steps),
+            total_urls_ingested=1 + len(expansion_steps),
+            max_depth_reached=max_depth_reached,
+            stop_reason=stop_reason,
+        )
+
+    def _step(self, iteration: int, depth: int) -> ExpansionStep:
+        from src.orchestration.models import ExpansionStep
+
+        return ExpansionStep(
+            iteration=iteration,
+            depth=depth,
+            source_url="https://example.com",
+            candidates_scored=1,
+            candidates_expanded=[f"https://example.com/d{depth}"],
+            candidates_failed=[],
+            chunks_added=1,
+            top_score_before=0.3,
+            top_score_after=0.5,
+            decision="expand_breadth",
+            reason="more sources",
+            duration_ms=10.0,
+        )
+
+    def test_deep_run_emits_search_line_with_depth_and_reason(self):
+        from src.mcp_server.formatter import _build_stats
+
+        result = self._make_result(
+            expansion_steps=[self._step(1, 1), self._step(2, 2), self._step(3, 3)],
+            max_depth_reached=3,
+            stop_reason="quality",
+        )
+        stats = _build_stats(result)
+        assert "[SEARCH] depth 3, stopped: diminishing returns" in stats
+
+    def test_backstop_stop_reason_phrased(self):
+        from src.mcp_server.formatter import _build_stats
+
+        result = self._make_result(
+            expansion_steps=[self._step(1, 1), self._step(2, 2)],
+            max_depth_reached=2,
+            stop_reason="max_pages",
+        )
+        stats = _build_stats(result)
+        assert "[SEARCH] depth 2, stopped: page-count safety limit" in stats
+
+    def test_fast_run_omits_search_line(self):
+        from src.mcp_server.formatter import _build_stats
+
+        result = self._make_result(
+            expansion_steps=[],
+            max_depth_reached=0,
+            stop_reason="quality",
+        )
+        stats = _build_stats(result)
+        assert "[SEARCH]" not in stats
+
+
+# ===================================================================
 # 1.6  Merger Tests
 # ===================================================================
 
@@ -1614,6 +1918,8 @@ class TestEngineOneExpansion:
             candidates_selected=1,
             chunks_added=3,
             depth=1,
+            reachable_total=None,
+            tokens_indexed=50,
         ))
 
         with _override_settings(
@@ -1793,7 +2099,7 @@ class TestEngineMaxIterationCap:
         expand_mock = AsyncMock(return_value=MagicMock(
             urls_ingested=["https://example.com/exp"],
             urls_failed=[], candidates_scored=1, candidates_selected=1,
-            chunks_added=1, depth=1,
+            chunks_added=1, depth=1, reachable_total=None, tokens_indexed=1,
         ))
 
         with _override_settings(
@@ -1817,6 +2123,200 @@ class TestEngineMaxIterationCap:
         assert result.total_iterations <= max_depth
         assert result.final_decision.action == "stop"
         assert "max expansion depth" in result.final_decision.reason.lower()
+
+
+def _always_expand_signals_decision(
+    *, action: str = "expand_breadth",
+) -> tuple[EvaluationSignals, ExpansionDecision]:
+    """Build a (signals, decision) pair the evaluator would return when it
+    wants another breadth round.  Used by the multi-level / backstop tests
+    so the loop keeps descending until a stop or a backstop fires."""
+    signals = EvaluationSignals(
+        top_score=0.4, score_at_k=0.4, score_cliff=0.0,
+        score_variance=0.0, score_mean=0.4,
+        chunks_above_threshold=1, token_fill_ratio=0.1,
+        redundancy_ratio=0.0, source_document_count=1,
+        avg_confidence=None, is_plateau=False, is_cliff=True,
+        is_saturated=False, is_mediocre_plateau=False,
+        has_high_redundancy=False,
+    )
+    decision = ExpansionDecision(
+        action=action, reason="Need more sources.", confidence="medium",
+    )
+    return signals, decision
+
+
+def _make_expand_outcome(depth: int, *, tokens_indexed: int = 100) -> MagicMock:
+    """A breadth ExpansionOutcome that ingests one fresh URL at *depth*."""
+    return MagicMock(
+        urls_attempted=[f"https://example.com/d{depth}"],
+        urls_ingested=[f"https://example.com/d{depth}"],
+        urls_failed=[],
+        candidates_scored=3,
+        candidates_selected=1,
+        chunks_added=2,
+        depth=depth,
+        reachable_total=None,
+        tokens_indexed=tokens_indexed,
+    )
+
+
+class TestEngineMultiLevelDescent:
+    """Genuine N-level recursion: links → their links → … descends >1 hop."""
+
+    @pytest.mark.asyncio
+    async def test_descends_multiple_levels(self):
+        from src.orchestration.engine import OrchestratorEngine
+
+        engine = OrchestratorEngine()
+
+        rr = _make_retrieval_result([_make_retrieved_chunk(score=0.4)], mode="chunk")
+
+        def make_rerank(query, passages, **kw):
+            scores = kw.get("original_scores", [0.5] * len(passages))
+            return [RerankResult(index=i, relevance_score=s) for i, s in enumerate(scores)]
+
+        # Evaluator: expand_breadth for rounds 1 and 2, then stop on round 3.
+        # Initial eval (iteration 0) + 3 post-iteration evals.
+        eval_seq = [
+            _always_expand_signals_decision(),  # initial
+            _always_expand_signals_decision(),  # after iter 1
+            _always_expand_signals_decision(),  # after iter 2
+            (
+                _always_expand_signals_decision()[0],
+                ExpansionDecision(
+                    action="stop", reason="Good plateau.", confidence="high",
+                ),
+            ),  # after iter 3 → halt
+        ]
+
+        # Each breadth round descends one level deeper.
+        depth_counter = {"d": 0}
+
+        async def fake_expand(*args, **kwargs):
+            depth_counter["d"] += 1
+            return _make_expand_outcome(depth_counter["d"])
+
+        with _override_settings(
+            reranker_provider="none",
+            decomposition_mode="none",
+            retrieval_context_budget=4096,
+            locality_expansion_enabled=False,
+            max_expansion_depth=5,
+            max_pages_per_answer=100,
+            max_tokens_indexed_per_answer=10_000_000,
+            answer_wallclock_budget_seconds=600,
+        ):
+            with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
+                with patch.object(engine, "_release_connection", new_callable=AsyncMock):
+                    with patch.object(engine, "_ensure_ingested", new_callable=AsyncMock):
+                        with patch("src.orchestration.engine.retrieve", AsyncMock(return_value=rr)):
+                            with patch("src.orchestration.engine.rerank", AsyncMock(side_effect=make_rerank)):
+                                with patch("src.orchestration.engine.evaluate", AsyncMock(side_effect=eval_seq)):
+                                    with patch("src.orchestration.engine.expand", AsyncMock(side_effect=fake_expand)):
+                                        result = await engine.run(
+                                            "https://example.com", "test query",
+                                            research_mode="deep",
+                                        )
+
+        # Three breadth rounds ran → descended to depth 3 (>= 2 required).
+        assert result.total_iterations == 3
+        assert result.max_depth_reached >= 2
+        assert result.max_depth_reached == 3
+        # Halted on the evaluator's quality stop, not a backstop.
+        assert result.stop_reason == "quality"
+        # Each round folded a fresh page into the corpus (seed ingestion is
+        # mocked out here, so only the 3 expanded pages are counted).
+        assert result.total_urls_ingested == 3
+
+
+class TestEngineBackstops:
+    """Hard safety ceilings set stop_reason and halt the descent."""
+
+    def _run_until_backstop(self, engine, *, overrides):
+        """Drive run() with an evaluator that never stops on its own, so a
+        backstop is the only thing that can halt the loop.  Returns the
+        OrchestrationResult."""
+        rr = _make_retrieval_result([_make_retrieved_chunk(score=0.4)], mode="chunk")
+
+        def make_rerank(query, passages, **kw):
+            scores = kw.get("original_scores", [0.5] * len(passages))
+            return [RerankResult(index=i, relevance_score=s) for i, s in enumerate(scores)]
+
+        # Evaluator ALWAYS wants to expand — the loop only ends via backstop
+        # (or the max_expansion_depth iteration cap, kept high here).
+        async def always_expand(*args, **kwargs):
+            return _always_expand_signals_decision()
+
+        depth_counter = {"d": 0}
+
+        async def fake_expand(*args, **kwargs):
+            depth_counter["d"] += 1
+            # Large per-round token bump so the token backstop can trip fast.
+            return _make_expand_outcome(depth_counter["d"], tokens_indexed=5000)
+
+        base = dict(
+            reranker_provider="none",
+            decomposition_mode="none",
+            retrieval_context_budget=4096,
+            locality_expansion_enabled=False,
+            max_expansion_depth=50,  # high so the iteration cap isn't the stop
+            max_pages_per_answer=1000,
+            max_tokens_indexed_per_answer=10_000_000,
+            answer_wallclock_budget_seconds=600,
+        )
+        base.update(overrides)
+
+        async def _go():
+            with _override_settings(**base):
+                with patch.object(engine, "_acquire_connection", new_callable=AsyncMock, return_value=MagicMock()):
+                    with patch.object(engine, "_release_connection", new_callable=AsyncMock):
+                        with patch.object(engine, "_ensure_ingested", new_callable=AsyncMock):
+                            with patch("src.orchestration.engine.retrieve", AsyncMock(return_value=rr)):
+                                with patch("src.orchestration.engine.rerank", AsyncMock(side_effect=make_rerank)):
+                                    with patch("src.orchestration.engine.evaluate", AsyncMock(side_effect=always_expand)):
+                                        with patch("src.orchestration.engine.expand", AsyncMock(side_effect=fake_expand)):
+                                            return await engine.run(
+                                                "https://example.com", "test query",
+                                                research_mode="deep",
+                                            )
+
+        return asyncio.run(_go())
+
+    def test_max_pages_backstop(self):
+        from src.orchestration.engine import OrchestratorEngine
+
+        engine = OrchestratorEngine()
+        # Cap at 4 distinct pages.  Seed ingestion is mocked out, so the
+        # loop expands 4 fresh pages, then the next loop-entry check trips.
+        result = self._run_until_backstop(
+            engine, overrides={"max_pages_per_answer": 4},
+        )
+        assert result.stop_reason == "max_pages"
+        assert result.total_urls_ingested == 4
+
+    def test_max_tokens_backstop(self):
+        from src.orchestration.engine import OrchestratorEngine
+
+        engine = OrchestratorEngine()
+        # 5000 tokens/round; cap at 12000 → trips on the 3rd loop-entry check.
+        result = self._run_until_backstop(
+            engine, overrides={"max_tokens_indexed_per_answer": 12_000},
+        )
+        assert result.stop_reason == "max_tokens"
+
+    def test_wallclock_backstop(self):
+        from src.orchestration.engine import OrchestratorEngine
+
+        engine = OrchestratorEngine()
+        # Zero-second budget → the very first loop-entry check trips it,
+        # before any expansion round runs.
+        result = self._run_until_backstop(
+            engine, overrides={"answer_wallclock_budget_seconds": 0.0},
+        )
+        assert result.stop_reason == "wallclock"
+        # Backstop fired at loop entry, so no breadth round executed.
+        assert result.total_iterations == 0
 
 
 class TestEngineGracefulDegradation:

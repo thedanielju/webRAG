@@ -35,6 +35,34 @@ class Settings(BaseSettings):
         default=500, validation_alias="INGEST_DISCOVER_LINKS_DEFAULT_LIMIT"
     )
 
+    # Ingestion provider selection: "firecrawl" | "raw" | "auto".
+    #   firecrawl — always use Firecrawl (requires FIRECRAWL_API_KEY).
+    #   raw       — always use the key-free httpx + BeautifulSoup fetcher.
+    #   auto      — use Firecrawl when FIRECRAWL_API_KEY is set, else raw.
+    # Default is "auto" so the shipped paid path stays best-quality when a
+    # key is present, but a keyless install still works out of the box.
+    ingestion_provider: str = Field(
+        default="auto", validation_alias="INGESTION_PROVIDER"
+    )
+    # Per-request timeout (seconds) for the raw-HTTP fetch path and for
+    # robots.txt fetches.
+    raw_fetch_timeout_seconds: float = Field(
+        default=30.0, validation_alias="RAW_FETCH_TIMEOUT_SECONDS"
+    )
+
+    # ── Polite crawling (both fetch paths) ────────────────────────
+    # Honour robots.txt before fetching any URL (default true).  Disallowed
+    # URLs are skipped and surfaced, never crashing the run.
+    respect_robots_txt: bool = Field(
+        default=True, validation_alias="RESPECT_ROBOTS_TXT"
+    )
+    # Max fetches per second to a single origin (default 1.0).  Enforced by
+    # a per-origin async spacing limiter on both fetch paths.  Set to 0 to
+    # disable rate limiting.
+    crawl_rate_limit_rps: float = Field(
+        default=1.0, validation_alias="CRAWL_RATE_LIMIT_RPS"
+    )
+
     # Indexing / Embeddings
     database_url: str = Field(default="", validation_alias="DATABASE_URL")
     embedding_base_url: str = Field(
@@ -154,6 +182,35 @@ class Settings(BaseSettings):
     expansion_min_candidate_score: float = Field(
         default=0.12, validation_alias="EXPANSION_MIN_CANDIDATE_SCORE"
     )
+    # When enabled (default), deep-mode expansion enumerates the seed's
+    # reachable page universe via Firecrawl /map and ranks expansion
+    # candidates against it (not just links found in scraped bodies).
+    # Gated to deep mode regardless of this flag — fast mode never maps.
+    reachability_enabled: bool = Field(
+        default=True, validation_alias="REACHABILITY_ENABLED"
+    )
+
+    # ── Orchestration: Hard safety backstops ──────────────────────
+    # These are a SAFETY BACKSTOP for genuine multi-level recursion, not
+    # the normal stop.  A quality-driven run halts via the evaluator long
+    # before any of these trip; they exist only to bound worst-case spend
+    # / latency on pathological sites.  When one trips, the loop stops and
+    # the breach is logged + surfaced as the run's stop_reason.
+    #
+    # Max distinct pages indexed across a single answer (seed + expansion).
+    max_pages_per_answer: int = Field(
+        default=25, validation_alias="MAX_PAGES_PER_ANSWER"
+    )
+    # Max total content tokens (word-count proxy) indexed during expansion
+    # across a single answer.
+    max_tokens_indexed_per_answer: int = Field(
+        default=200_000, validation_alias="MAX_TOKENS_INDEXED_PER_ANSWER"
+    )
+    # Wall-clock budget (seconds) for a single answer's run() loop,
+    # measured on a monotonic clock captured at run start.
+    answer_wallclock_budget_seconds: float = Field(
+        default=90.0, validation_alias="ANSWER_WALLCLOCK_BUDGET_SECONDS"
+    )
 
     # ── Orchestration: Locality Expansion ─────────────────────────
     locality_expansion_enabled: bool = Field(
@@ -239,7 +296,9 @@ class Settings(BaseSettings):
     mcp_enable_expansion_recommendations: bool = Field(
         default=True, validation_alias="MCP_ENABLE_EXPANSION_RECOMMENDATIONS"
     )
-    # Reserve response tokens for citations so they survive large evidence blocks.
+    # Deprecated: citations are now a guaranteed section in the formatter
+    # (never dropped by budget).  This setting is retained for backward
+    # compatibility but no longer used for budget reservation.
     mcp_citations_reserved_tokens: int = Field(
         default=1500, validation_alias="MCP_CITATIONS_RESERVED_TOKENS"
     )
