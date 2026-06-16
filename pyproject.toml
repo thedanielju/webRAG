@@ -28,6 +28,7 @@ dependencies = [
 ]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 markers = [
     "live: test makes real network / paid-API calls (Firecrawl, etc.); deselect in CI with -m 'not live'",
 ]
